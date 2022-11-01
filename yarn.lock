@@ -2266,11 +2266,6 @@ function-bind@^1.1.1:
   resolved "https://registry.yarnpkg.com/function-bind/-/function-bind-1.1.1.tgz#a56899d3ea3c9bab874bb9773b7c5ede92f4895d"
   integrity sha512-yIovAzMX49sF8Yl58fSCWJ5svSLuaibPxXQJFLmBObTuCr0Mf1KiPopGM9NiFjiYBCbfaa2Fh6breQ6ANVTI0A==
 
-functional-red-black-tree@^1.0.1:
-  version "1.0.1"
-  resolved "https://registry.yarnpkg.com/functional-red-black-tree/-/functional-red-black-tree-1.0.1.tgz#1b0ab3bd553b2a0d6399d29c0e3ea0b252078327"
-  integrity sha1-GwqzvVU7Kg1jmdKcDj6gslIHgyc=
-
 gensync@^1.0.0-beta.2:
   version "1.0.0-beta.2"
   resolved "https://registry.yarnpkg.com/gensync/-/gensync-1.0.0-beta.2.tgz#32a6ee76c3d7f52d46b2b1ae5d93fea8580a25e0"
@@ -4270,10 +4265,10 @@ typedarray-to-buffer@^3.1.5:
   dependencies:
     is-typedarray "^1.0.0"
 
-typedoc@^0.23.13:
-  version "0.23.13"
-  resolved "https://registry.yarnpkg.com/typedoc/-/typedoc-0.23.13.tgz#a522ed86eb326c918a05d4acad4e6d815cd1b1f8"
-  integrity sha512-47VgWyZ5Q8g5dtJxjIHvFqX7ZD+YQRLAFRhLjt6v9KW0//feHtLUrbukHkKcvQuua1xQtdvkQ17fCjmF7qLXlg==
+typedoc@^0.23.19:
+  version "0.23.19"
+  resolved "https://registry.yarnpkg.com/typedoc/-/typedoc-0.23.19.tgz#6c8b76a7b5c1fc316e961464f0d6c3592ff09328"
+  integrity sha512-70jPL0GQnSJtgQqI7ifOWxpTXrB3sxc4SWPPRn3K0wdx3txI6ZIT/ZYMF39dNg2Gjmql45cO+cAKXJp0TpqOVA==
   dependencies:
     lunr "^2.3.9"
     marked "^4.0.19"
