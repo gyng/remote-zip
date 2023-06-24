@@ -1,6 +1,6 @@
 # remote-zip
 
-[API documentation](https://basisai.github.io/remote-zip)
+[API documentation](https://gyng.github.io/remote-zip)
 
 Fetch file listings and individual files from a remote ZIP file.
 
@@ -28,16 +28,16 @@ The gist of what the library does is:
 ## Install
 
 ```bash
-yarn add @basisai/remote-zip
+yarn add @gyng/remote-zip
 ```
 
 ```bash
-npm install --save @basisai/remote-zip
+npm install --save @gyng/remote-zip
 ```
 
 ## Usage
 
-See the [generated API documentation](https://basisai.github.io/remote-zip/).
+See the [generated API documentation](https://gyng.github.io/remote-zip/).
 
 If using in the browser, the server will need to whitelist CORS for `GET`, `HEAD`, and the `Range` header.
 
