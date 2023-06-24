@@ -1,10 +1,10 @@
 {
-  "name": "@basisai/remote-zip",
-  "version": "0.2.4",
+  "name": "@gyng/remote-zip",
+  "version": "0.2.5",
   "main": "lib/cjs/index.js",
   "module": "lib/esm/index.js",
   "types": "lib/types/index.d.ts",
-  "author": "AIcadium, Ng Guoyou <guoyou.ng@aicadium.ai>",
+  "author": "AIcadium, Ng Guoyou <gyng@users.noreply.github.com>",
   "license": "MIT",
   "files": [
     "LICENSE",
@@ -13,7 +13,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git://github.com/basisai/remote-zip.git"
+    "url": "git://github.com/gyng/remote-zip.git"
   },
   "scripts": {
     "build": "rm -rf lib/* && yarn ts-types && node ./esbuild.mjs",
