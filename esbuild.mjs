@@ -11,7 +11,7 @@ const onEndPlugin = {
   },
 };
 
-let ctx = await esbuild.context({
+let ctx = esbuild.context({
   entryPoints: ["src/index.ts"],
   outdir: "lib/esm",
   bundle: true,
@@ -53,6 +53,8 @@ esbuild
 
 // Dev mode
 if (process.env["WATCH"] === "1") {
-  await ctx.watch();
+  await (await ctx).watch();
   console.log("esbuild is watching...");
+} else {
+  process.exit(0);
 }
