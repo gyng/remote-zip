@@ -6,7 +6,7 @@ changes. It encodes how we want code written here, not just what the code does.
 ## What this project is
 
 `@gyng/remote-zip` lists and fetches **individual files from a remote ZIP over HTTP
-Range requests, without downloading the whole archive**. It runs in both Node (>=18)
+Range requests, without downloading the whole archive**. It runs in both Node (>=20)
 and the browser. The whole library is intentionally small — keep it that way.
 
 The mechanism:

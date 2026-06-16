@@ -5,17 +5,46 @@ on:
     types: [created]
   workflow_dispatch:
 
+# Official GitHub Pages deployment. Set Pages source to "GitHub Actions" in the
+# repository settings (Settings -> Pages -> Build and deployment -> Source).
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
-  publish_docs:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Build
-        run: docker-compose -f docker-compose.docs.yml up --build --exit-code-from app
-
-      - name: Deploy
-        uses: JamesIves/github-pages-deploy-action@4.1.4
+      - uses: actions/setup-node@v4
         with:
-          branch: gh-pages
-          folder: docs/api
+          node-version: lts/*
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate API docs
+        run: npm run doc:gen
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/api
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

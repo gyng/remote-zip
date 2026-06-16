@@ -28,11 +28,11 @@ The gist of what the library does is:
 ## Install
 
 ```bash
-yarn add @gyng/remote-zip
+npm install @gyng/remote-zip
 ```
 
 ```bash
-npm install --save @gyng/remote-zip
+yarn add @gyng/remote-zip
 ```
 
 ## Usage
@@ -72,15 +72,16 @@ const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders);
 <summary>Dev instructions</summary>
 See `scripts` in `package.json` for more scripts.
 
-- `npm run d` watch and build
-- `npm run t:watch` watch and test
-- `npm run lint`
-- `npm run build`
+Requires Node >= 20.
 
-Run tests and checks with Docker
-
-```
-docker-compose -f docker-compose.test.yml up --build
+```bash
+npm ci            # install (reproducible, honours .npmrc cooldown)
+npm run d         # watch and build
+npm run t:watch   # watch and test
+npm run lint      # prettier + eslint
+npm run typecheck # tsc --noEmit (also checks tests)
+npm run build     # type declarations + esm/cjs bundles
+npm test          # run the test suite once
 ```
 
 ### Publish

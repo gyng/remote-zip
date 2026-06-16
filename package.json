@@ -31,7 +31,7 @@
     "url": "https://github.com/gyng/remote-zip/issues"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "packageManager": "npm@11.11.0",
   "files": [
@@ -60,7 +60,8 @@
     "test:coverage": "vitest run --coverage",
     "test": "vitest run",
     "ts-types": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

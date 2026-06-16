@@ -28,7 +28,7 @@ const cjsOptions = {
   outdir: "lib/cjs",
   format: "cjs",
   platform: "node",
-  target: ["node18"],
+  target: ["node20"],
 };
 
 const watch = process.env["WATCH"] === "1";
