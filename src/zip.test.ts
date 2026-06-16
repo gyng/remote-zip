@@ -25,10 +25,49 @@ import {
 } from ".";
 
 /**
- * Minimal static file server with HTTP Range support, serving files from `root`.
- * Replaces the `http-server` dev dependency (which pulled a large, vulnerable
- * transitive tree) with ~30 lines of the Node standard library. `onRequest` is
- * invoked for every request so tests can assert on forwarded headers.
+ * Send `body` over HTTP with Range support (the ~30 lines of node:http + node:fs
+ * that replace the http-server dev dependency). Returns 405 for non-GET/HEAD.
+ */
+function sendBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  body: Uint8Array,
+): void {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.statusCode = 405;
+    res.end();
+    return;
+  }
+
+  const isHead = req.method === "HEAD";
+  const rangeMatch = /^bytes=(\d+)-(\d*)$/.exec(req.headers["range"] ?? "");
+  if (rangeMatch) {
+    const start = Number(rangeMatch[1]);
+    // A range that starts at or past EOF is unsatisfiable (RFC 7233 -> 416).
+    if (start >= body.length) {
+      res.statusCode = 416;
+      res.setHeader("Content-Range", `bytes */${body.length}`);
+      res.end();
+      return;
+    }
+    const end = rangeMatch[2]
+      ? Math.min(Number(rangeMatch[2]), body.length - 1)
+      : body.length - 1;
+    res.statusCode = 206;
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${body.length}`);
+    res.setHeader("Content-Length", String(end - start + 1));
+    res.end(isHead ? undefined : body.subarray(start, end + 1));
+    return;
+  }
+
+  res.statusCode = 200;
+  res.setHeader("Content-Length", String(body.length));
+  res.end(isHead ? undefined : body);
+}
+
+/**
+ * Static file server with Range support, serving files from `root`. `onRequest`
+ * is invoked for every request so tests can assert on forwarded headers.
  */
 function createFixtureServer(
   root: string,
@@ -36,48 +75,26 @@ function createFixtureServer(
 ): Server {
   return http.createServer((req, res) => {
     onRequest(req);
-
-    // Mirror http-server: only GET/HEAD are served, everything else is 405.
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      res.statusCode = 405;
-      res.end();
-      return;
-    }
-
     const path = (req.url ?? "").split("?")[0];
-    let body: Buffer;
+    let body: Uint8Array;
     try {
-      body = readFileSync(join(root, path));
+      body = new Uint8Array(readFileSync(join(root, path)));
     } catch {
       res.statusCode = 404;
       res.end();
       return;
     }
+    sendBody(req, res, body);
+  });
+}
 
-    const isHead = req.method === "HEAD";
-    const rangeMatch = /^bytes=(\d+)-(\d*)$/.exec(req.headers["range"] ?? "");
-    if (rangeMatch) {
-      const start = Number(rangeMatch[1]);
-      // A range that starts at or past EOF is unsatisfiable (RFC 7233 -> 416).
-      if (start >= body.length) {
-        res.statusCode = 416;
-        res.setHeader("Content-Range", `bytes */${body.length}`);
-        res.end();
-        return;
-      }
-      const end = rangeMatch[2]
-        ? Math.min(Number(rangeMatch[2]), body.length - 1)
-        : body.length - 1;
-      res.statusCode = 206;
-      res.setHeader("Content-Range", `bytes ${start}-${end}/${body.length}`);
-      res.setHeader("Content-Length", String(end - start + 1));
-      res.end(isHead ? undefined : body.subarray(start, end + 1));
-      return;
-    }
-
-    res.statusCode = 200;
-    res.setHeader("Content-Length", String(body.length));
-    res.end(isHead ? undefined : body);
+/** Listen on an ephemeral port and resolve the chosen port. */
+function listen(server: Server): Promise<number> {
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      resolve(typeof addr === "object" && addr ? addr.port : 0);
+    });
   });
 }
 
@@ -368,5 +385,121 @@ describe("parseAllCDs / parseOneCD", () => {
 
   it("parseOneCD returns null when no record is present", () => {
     expect(parseOneCD(new ArrayBuffer(64))).toBeNull();
+  });
+});
+
+/** Build a minimal, valid ZIP containing one stored file "a.txt" = "hi". */
+function buildMinimalZip(comment = ""): Uint8Array {
+  const enc = new TextEncoder();
+  const name = enc.encode("a.txt");
+  const data = enc.encode("hi");
+  const commentBytes = enc.encode(comment);
+
+  const lfhLen = 30 + name.length + data.length;
+  const cdLen = 46 + name.length;
+  const eocdLen = 22 + commentBytes.length;
+  const buf = new Uint8Array(lfhLen + cdLen + eocdLen);
+  const dv = new DataView(buf.buffer);
+
+  // Local file header @ 0
+  dv.setUint32(0, 0x504b0304); // signature
+  dv.setUint16(4, 20, true); // version to extract
+  dv.setUint16(8, 0, true); // compression method = store
+  dv.setUint32(18, data.length, true); // compressed size
+  dv.setUint32(22, data.length, true); // uncompressed size
+  dv.setUint16(26, name.length, true); // filename length
+  buf.set(name, 30);
+  buf.set(data, 30 + name.length);
+
+  // Central directory @ lfhLen
+  const cdOff = lfhLen;
+  dv.setUint32(cdOff, 0x504b0102); // signature
+  dv.setUint16(cdOff + 6, 20, true); // version to extract
+  dv.setUint32(cdOff + 20, data.length, true); // compressed size
+  dv.setUint32(cdOff + 24, data.length, true); // uncompressed size
+  dv.setUint16(cdOff + 28, name.length, true); // filename length
+  dv.setUint32(cdOff + 42, 0, true); // local file header relative offset
+  buf.set(name, cdOff + 46);
+
+  // End of central directory @ lfhLen + cdLen
+  const eOff = lfhLen + cdLen;
+  dv.setUint32(eOff, 0x504b0506); // signature
+  dv.setUint16(eOff + 8, 1, true); // cd records on this disk
+  dv.setUint16(eOff + 10, 1, true); // total cd records
+  dv.setUint32(eOff + 12, cdLen, true); // cd size
+  dv.setUint32(eOff + 16, lfhLen, true); // cd offset
+  dv.setUint16(eOff + 20, commentBytes.length, true); // comment length
+  buf.set(commentBytes, eOff + 22);
+
+  return buf;
+}
+
+describe("long zip comments", () => {
+  it("re-fetches a larger window to find the EOCD past a long comment", async () => {
+    // A comment longer than the initial 128-byte EOCD window forces a re-fetch.
+    const comment = "x".repeat(500);
+    const zip = buildMinimalZip(comment);
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      expect(remoteZip.files().map((f) => f.filename)).toEqual(["a.txt"]);
+      expect(remoteZip.endOfCentralDirectory?.data.comment).toBe(comment);
+      expect(new TextDecoder().decode(await remoteZip.fetch("a.txt"))).toBe(
+        "hi",
+      );
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("request options", () => {
+  it("rejects when the abort signal is already aborted", async () => {
+    const zip = buildMinimalZip();
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      await expect(
+        new RemoteZipPointer({ url, signal: AbortSignal.abort() }).populate(),
+      ).rejects.toThrow();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("times out a slow server via timeoutMs", async () => {
+    const zip = buildMinimalZip();
+    const server = http.createServer((req, res) => {
+      const t = setTimeout(() => sendBody(req, res, zip), 1000);
+      req.on("close", () => clearTimeout(t));
+    });
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      await expect(
+        new RemoteZipPointer({ url, timeoutMs: 50 }).populate(),
+      ).rejects.toThrow();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("respects redirect: 'error'", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(302, { Location: "/elsewhere" });
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      await expect(
+        new RemoteZipPointer({ url, redirect: "error" }).populate(),
+      ).rejects.toThrow();
+    } finally {
+      server.close();
+    }
   });
 });

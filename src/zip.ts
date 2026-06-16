@@ -273,6 +273,14 @@ export class RemoteZip {
   method: string;
   /** Credentials passed to `fetch` when retrieving files. Defaults to `same-origin`. */
   credentials: "include" | "omit" | "same-origin";
+  /** Redirect mode passed to `fetch`. Defaults to `"follow"`. */
+  redirect?: RequestRedirect;
+  /** Signal that aborts in-flight requests. */
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Extra RequestInit merged into every `fetch`. */
+  requestInit?: RequestInit;
 
   constructor({
     contentLength,
@@ -281,6 +289,10 @@ export class RemoteZip {
     endOfCentralDirectory,
     method,
     credentials = "same-origin",
+    redirect,
+    signal,
+    timeoutMs,
+    requestInit,
   }: {
     /** Length of the remote ZIP archive in bytes */
     contentLength: number;
@@ -292,13 +304,39 @@ export class RemoteZip {
     method: string;
     /** Passed to fetch when performing a HTTP GET request for the file. */
     credentials: "include" | "omit" | "same-origin";
-  }) {
+  } & Pick<
+    RemoteZipRequestOptions,
+    "redirect" | "signal" | "timeoutMs" | "requestInit"
+  >) {
     this.contentLength = contentLength;
     this.url = url;
     this.method = method;
     this.centralDirectoryRecords = centralDirectoryRecords;
     this.endOfCentralDirectory = endOfCentralDirectory;
     this.credentials = credentials;
+    this.redirect = redirect;
+    this.signal = signal;
+    this.timeoutMs = timeoutMs;
+    this.requestInit = requestInit;
+  }
+
+  /** Build a fetch RequestInit from this instance's network options. */
+  private requestInitFor(
+    method: string,
+    headers?: Headers,
+    override?: { signal?: AbortSignal; timeoutMs?: number },
+  ): RequestInit {
+    return buildRequestInit(
+      {
+        credentials: this.credentials,
+        redirect: this.redirect,
+        signal: override?.signal ?? this.signal,
+        timeoutMs: override?.timeoutMs ?? this.timeoutMs,
+        requestInit: this.requestInit,
+      },
+      method,
+      headers,
+    );
   }
 
   /**
@@ -335,19 +373,20 @@ export class RemoteZip {
    * @param options.maxUncompressedSize If set, inflation aborts and throws once the
    *   decompressed output would exceed this many bytes. Set this when handling
    *   untrusted archives to guard against decompression bombs.
+   * @param options.signal Aborts this request (in addition to any instance-level signal).
+   * @param options.timeoutMs Per-request timeout for this fetch.
    * @returns Inflated (uncompressed) bytes of the requested file
    * @throws [RemoteZipError](RemoteZipError) if it fails to parse, fetch, or exceeds limits
    */
   public async fetch(
     path: string,
     additionalHeaders?: Headers,
-    options?: { maxUncompressedSize?: number },
+    options?: {
+      maxUncompressedSize?: number;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+    },
   ): Promise<Uint8Array> {
-    // TODO: offer a streaming variant returning a ReadableStream so callers can
-    // process large entries without buffering the whole thing (e.g. video
-    // previews). Now feasible: the platform `fetch` exposes `response.body` as a
-    // WHATWG ReadableStream in both Node (>=18) and browsers.
-
     const file = this.centralDirectoryRecords.find(
       (r) => r.data.filename === path,
     );
@@ -384,13 +423,13 @@ export class RemoteZip {
       }`,
     );
 
-    const response = await fetch(this.url.toString(), {
-      method: this.method,
-      headers,
-      redirect: "follow", // TODO: make this configurable
-      credentials: this.credentials,
-      // TODO: additional fetch options
-    });
+    const response = await fetch(
+      this.url.toString(),
+      this.requestInitFor(this.method, headers, {
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      }),
+    );
     const localFile = parseOneLocalFile(
       await response.arrayBuffer(),
       file.data.compressedSize,
@@ -474,6 +513,54 @@ const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
 };
 
 /**
+ * Network options shared by every request a {@link RemoteZip} / {@link RemoteZipPointer}
+ * makes. All are optional with sensible defaults.
+ */
+export interface RemoteZipRequestOptions {
+  /** HTTP method for the Range GET requests. The metadata probe is always a HEAD. Defaults to `"GET"`. */
+  method?: string;
+  /** Passed to `fetch`. Defaults to `"same-origin"`. */
+  credentials?: "include" | "omit" | "same-origin";
+  /**
+   * Passed to `fetch`. Defaults to `"follow"`. Use `"manual"` or `"error"` to avoid
+   * leaking `Authorization`/cookies cross-origin when a server responds with a redirect.
+   */
+  redirect?: RequestRedirect;
+  /** Aborts in-flight requests when this signal fires. */
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds; combined with `signal` via `AbortSignal.any`. */
+  timeoutMs?: number;
+  /** Escape hatch merged into every `fetch` RequestInit (lowest precedence — the options above win). */
+  requestInit?: RequestInit;
+}
+
+/** Combine an optional caller signal with an optional fresh per-request timeout. */
+const combineSignal = (
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): AbortSignal | undefined => {
+  const parts: AbortSignal[] = [];
+  if (signal) parts.push(signal);
+  if (timeoutMs !== undefined) parts.push(AbortSignal.timeout(timeoutMs));
+  if (parts.length === 0) return undefined;
+  return parts.length === 1 ? parts[0] : AbortSignal.any(parts);
+};
+
+/** Build a `fetch` RequestInit from the shared options plus a per-call method/headers. */
+const buildRequestInit = (
+  options: Omit<RemoteZipRequestOptions, "method">,
+  method: string,
+  headers?: Headers,
+): RequestInit => ({
+  ...options.requestInit,
+  method,
+  headers,
+  redirect: options.redirect ?? "follow",
+  credentials: options.credentials,
+  signal: combineSignal(options.signal, options.timeoutMs),
+});
+
+/**
  * An uninitialised pointer to a remote ZIP file.
  *
  * No network requests are sent until `populate()` is called.
@@ -496,6 +583,14 @@ export class RemoteZipPointer {
   method: string;
   /** Credentials passed to `fetch` when retrieving files. Defaults to `same-origin`. */
   credentials: "include" | "omit" | "same-origin";
+  /** Redirect mode passed to `fetch`. Defaults to `"follow"`. */
+  redirect?: RequestRedirect;
+  /** Signal that aborts in-flight requests. */
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Extra RequestInit merged into every `fetch`. */
+  requestInit?: RequestInit;
 
   constructor({
     url,
@@ -503,6 +598,10 @@ export class RemoteZipPointer {
     additionalHeaders,
     method = "GET",
     credentials = "same-origin",
+    redirect,
+    signal,
+    timeoutMs,
+    requestInit,
   }: {
     /** URL for GET requests */
     url: URL;
@@ -514,12 +613,34 @@ export class RemoteZipPointer {
     credentials?: "include" | "omit" | "same-origin";
     /** URL for HEAD request. Defaults to `url`. This can, for example, differ from `url` if you are using a signed URL for S3. */
     headUrl?: URL;
-  }) {
+  } & Pick<
+    RemoteZipRequestOptions,
+    "redirect" | "signal" | "timeoutMs" | "requestInit"
+  >) {
     this.url = url;
     this.headUrl = headUrl ?? url;
     this.additionalHeaders = additionalHeaders;
     this.method = method;
     this.credentials = credentials;
+    this.redirect = redirect;
+    this.signal = signal;
+    this.timeoutMs = timeoutMs;
+    this.requestInit = requestInit;
+  }
+
+  /** Build a fetch RequestInit from this pointer's network options. */
+  private requestInitFor(method: string, headers?: Headers): RequestInit {
+    return buildRequestInit(
+      {
+        credentials: this.credentials,
+        redirect: this.redirect,
+        signal: this.signal,
+        timeoutMs: this.timeoutMs,
+        requestInit: this.requestInit,
+      },
+      method,
+      headers,
+    );
   }
 
   /**
@@ -529,12 +650,10 @@ export class RemoteZipPointer {
    * @throws [RemoteZipError](RemoteZipError) if it fails to parse or fetch
    */
   public async populate(): Promise<RemoteZip> {
-    const res = await fetch(this.headUrl.toString(), {
-      method: "HEAD",
-      headers: this.additionalHeaders,
-      redirect: "follow",
-      credentials: this.credentials,
-    });
+    const res = await fetch(
+      this.headUrl.toString(),
+      this.requestInitFor("HEAD", this.additionalHeaders),
+    );
     const contentLengthRaw = res.headers.get("content-length");
     if (!contentLengthRaw) {
       throw new RemoteZipError(
@@ -559,6 +678,10 @@ export class RemoteZipPointer {
       centralDirectoryRecords,
       method: this.method,
       credentials: this.credentials,
+      redirect: this.redirect,
+      signal: this.signal,
+      timeoutMs: this.timeoutMs,
+      requestInit: this.requestInit,
     });
   }
 
@@ -566,63 +689,61 @@ export class RemoteZipPointer {
     zipByteLength: number,
     additionalHeaders?: Headers,
   ): Promise<EndOfCentralDirectory> {
-    // EOCD has a variable length, due to the option of including a comment as the last field of the record.
-    // If there’s no comment it should only be 22 bytes. Arbitrary number.
-    // TODO: Fetch again if EOCD length > EOCD_MAX_BYTES
-    const EOCD_MAX_BYTES = 128;
-    const eocdInitialOffset = Math.max(0, zipByteLength - EOCD_MAX_BYTES);
-    const eocdHeaders = new Headers(additionalHeaders);
-    eocdHeaders.append("Range", `bytes=${eocdInitialOffset}-${zipByteLength}`);
-    const eocdRes = await fetch(this.url.toString(), {
-      method: this.method,
-      headers: eocdHeaders,
-      redirect: "follow",
-      credentials: this.credentials,
-    });
-    if (eocdRes.status < 200 || eocdRes.status >= 400) {
-      throw new RemoteZipError(
-        `Could not fetch remote ZIP at ${this.url}: HTTP status ${eocdRes.status}`,
-        "HTTP_ERROR",
+    // The EOCD is 22 bytes plus an optional comment of up to 65535 bytes. Try a
+    // small trailing window first (covers the common no/short-comment case), and
+    // only re-fetch the maximum-size window if the signature isn't found there.
+    const MAX_EOCD_BYTES = 22 + 0xffff;
+    const windows = [128, MAX_EOCD_BYTES];
+
+    for (const window of windows) {
+      const offset = Math.max(0, zipByteLength - window);
+      const eocdHeaders = new Headers(additionalHeaders);
+      eocdHeaders.append("Range", `bytes=${offset}-${zipByteLength}`);
+      const eocdRes = await fetch(
+        this.url.toString(),
+        this.requestInitFor(this.method, eocdHeaders),
       );
+      if (eocdRes.status < 200 || eocdRes.status >= 400) {
+        throw new RemoteZipError(
+          `Could not fetch remote ZIP at ${this.url}: HTTP status ${eocdRes.status}`,
+          "HTTP_ERROR",
+        );
+      }
+
+      const eocd = parseOneEOCD(await eocdRes.arrayBuffer());
+      if (eocd) {
+        if (isZip64(eocd)) {
+          throw new RemoteZipError(
+            "ZIP64 archives are not supported",
+            "UNSUPPORTED_ZIP64",
+          );
+        }
+
+        // The central directory must lie within the archive. Reject out-of-bounds
+        // offsets/sizes before we use them to build a Range request.
+        const {
+          centralDirectoryByteOffset: cdOffset,
+          centralDirectoryByteSize: cdSize,
+        } = eocd.data;
+        if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > zipByteLength) {
+          throw new RemoteZipError(
+            `Central directory is out of bounds (offset ${cdOffset}, size ${cdSize}, archive ${zipByteLength} bytes)`,
+            "CENTRAL_DIRECTORY_OUT_OF_BOUNDS",
+          );
+        }
+
+        return eocd;
+      }
+
+      // Not found in this window. If we already fetched from the start of the
+      // file, a larger window cannot help.
+      if (offset === 0) break;
     }
 
-    const eocdBuffer = await eocdRes.arrayBuffer();
-    if (!eocdBuffer) {
-      throw new RemoteZipError(
-        "Could not get Range request to start looking for EOCD",
-        "EOCD_NOT_FOUND",
-      );
-    }
-    const eocd = parseOneEOCD(eocdBuffer);
-
-    if (!eocd) {
-      throw new RemoteZipError(
-        "Could not get EOCD record of remote ZIP",
-        "EOCD_NOT_FOUND",
-      );
-    }
-
-    if (isZip64(eocd)) {
-      throw new RemoteZipError(
-        "ZIP64 archives are not supported",
-        "UNSUPPORTED_ZIP64",
-      );
-    }
-
-    // The central directory must lie within the archive. Reject out-of-bounds
-    // offsets/sizes before we use them to build a Range request.
-    const {
-      centralDirectoryByteOffset: cdOffset,
-      centralDirectoryByteSize: cdSize,
-    } = eocd.data;
-    if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > zipByteLength) {
-      throw new RemoteZipError(
-        `Central directory is out of bounds (offset ${cdOffset}, size ${cdSize}, archive ${zipByteLength} bytes)`,
-        "CENTRAL_DIRECTORY_OUT_OF_BOUNDS",
-      );
-    }
-
-    return eocd;
+    throw new RemoteZipError(
+      "Could not get EOCD record of remote ZIP",
+      "EOCD_NOT_FOUND",
+    );
   }
 
   private async fetchCentralDirectoryRecords(
@@ -638,12 +759,10 @@ export class RemoteZipPointer {
         endOfCentralDirectory.data.centralDirectoryByteSize
       }`,
     );
-    const cdRes = await fetch(this.url.toString(), {
-      method: this.method,
-      headers: cdHeaders,
-      redirect: "follow",
-      credentials: this.credentials,
-    });
+    const cdRes = await fetch(
+      this.url.toString(),
+      this.requestInitFor(this.method, cdHeaders),
+    );
     const cdBuffer = await cdRes.arrayBuffer();
     const cd = parseAllCDs(cdBuffer);
 

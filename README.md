@@ -20,10 +20,9 @@ The gist of what the library does is:
 
 ## Limitations
 
-- No ZIP64 support
-- No encrypted ZIP support
+- No ZIP64 support (ZIP64 archives are detected and rejected with a typed error)
+- No encrypted ZIP support (encrypted entries are detected and rejected)
 - No stream support via `ReadableStream` due to testing/dev difficulties
-- Long comments in a ZIP file might cause `populate()` to fail
 
 ## Install
 
@@ -53,17 +52,27 @@ const uncompressedBytes = await remoteZip.fetch("test.txt"); // Uint8Array
 ### With more features
 
 ```ts
-const method = "POST";
-const additonalHeaders = new Headers();
-additonalHeaders.append("X-Example", "foobar");
+const additionalHeaders = new Headers();
+additionalHeaders.append("X-Example", "foobar");
 const url = new URL("http://www.example.com/test.zip");
+
 const remoteZip = await new RemoteZipPointer({
   url,
   additionalHeaders,
-  method,
+  method: "POST",
   credentials: "include",
+  // New request options (all optional), applied to every request:
+  redirect: "error", // avoid leaking auth headers cross-origin on a 30x
+  timeoutMs: 10_000, // per-request timeout
+  signal: AbortSignal.timeout(30_000), // or your own AbortController signal
+  requestInit: { cache: "no-store" }, // escape hatch merged into every fetch
 }).populate();
-const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders);
+
+// Guard untrusted archives against decompression bombs, and pass a per-call
+// signal/timeout if you like:
+const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders, {
+  maxUncompressedSize: 50 * 1024 * 1024,
+});
 ```
 
 ## Dev
