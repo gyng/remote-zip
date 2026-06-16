@@ -1,6 +1,25 @@
 // @ts-check
 
 import * as esbuild from "esbuild";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+
+/**
+ * Emit ESM (`.d.mts`) twins of the `.d.ts` declarations so the package's
+ * "import" types condition resolves as ESM. Without this, a nodenext/node16
+ * ESM consumer sees the types as CommonJS (attw "FalseCJS" masquerade). The
+ * `.d.ts` files stay for the "require" condition.
+ */
+function emitEsmTypes(dir = "lib/types") {
+  if (!existsSync(`${dir}/index.d.ts`)) return;
+  // The barrel re-exports "./zip"; under nodenext ESM the specifier needs an
+  // explicit extension.
+  const index = readFileSync(`${dir}/index.d.ts`, "utf8").replace(
+    /(from\s+["'])\.\/zip(["'])/g,
+    "$1./zip.mjs$2",
+  );
+  writeFileSync(`${dir}/index.d.mts`, index);
+  writeFileSync(`${dir}/zip.d.mts`, readFileSync(`${dir}/zip.d.ts`, "utf8"));
+}
 
 /** Options shared by both output formats. */
 const shared = {
@@ -28,7 +47,7 @@ const cjsOptions = {
   outdir: "lib/cjs",
   format: "cjs",
   platform: "node",
-  target: ["node20"],
+  target: ["node22"],
 };
 
 const watch = process.env["WATCH"] === "1";
@@ -46,6 +65,7 @@ try {
     // without awaiting and called process.exit(0) immediately, so lib/cjs was
     // frequently never written.
     await Promise.all([esbuild.build(esmOptions), esbuild.build(cjsOptions)]);
+    emitEsmTypes();
     console.log("esbuild: esm + cjs build complete");
   }
 } catch (err) {

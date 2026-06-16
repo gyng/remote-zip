@@ -19,6 +19,7 @@ export type RemoteZipErrorCode =
   | "UNSUPPORTED_ENCRYPTION"
   | "FILE_NOT_FOUND"
   | "LOCAL_HEADER_PARSE_FAILED"
+  | "CENTRAL_DIRECTORY_OUT_OF_BOUNDS"
   | "DECOMPRESSION_LIMIT_EXCEEDED";
 
 export class RemoteZipError extends Error {
@@ -481,7 +482,7 @@ const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
  * const url = new URL("http://www.example.com/test.zip");
  * const remoteZip = await new RemoteZipPointer({ url }).populate();
  * const fileListing = remoteZip.files(); // RemoteZipFile[]
- * const uncompressedBytes = await remoteZip.fetch("test.txt"); // ArrayBuffer
+ * const uncompressedBytes = await remoteZip.fetch("test.txt"); // Uint8Array
  * ```
  */
 export class RemoteZipPointer {
@@ -605,6 +606,19 @@ export class RemoteZipPointer {
       throw new RemoteZipError(
         "ZIP64 archives are not supported",
         "UNSUPPORTED_ZIP64",
+      );
+    }
+
+    // The central directory must lie within the archive. Reject out-of-bounds
+    // offsets/sizes before we use them to build a Range request.
+    const {
+      centralDirectoryByteOffset: cdOffset,
+      centralDirectoryByteSize: cdSize,
+    } = eocd.data;
+    if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > zipByteLength) {
+      throw new RemoteZipError(
+        `Central directory is out of bounds (offset ${cdOffset}, size ${cdSize}, archive ${zipByteLength} bytes)`,
+        "CENTRAL_DIRECTORY_OUT_OF_BOUNDS",
       );
     }
 

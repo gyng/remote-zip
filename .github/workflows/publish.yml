@@ -3,7 +3,7 @@
 name: Publish
 on:
   release:
-    types: [created]
+    types: [published]
 
 permissions:
   contents: read
@@ -40,10 +40,7 @@ jobs:
       - name: Attest build provenance for the shipped bundles
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: |
-            lib/cjs/index.js
-            lib/esm/index.mjs
-            lib/types/index.d.ts
+          subject-path: "lib/**/*"
 
       - name: Publish to npm (with provenance)
         run: npm publish --provenance --access public

@@ -47,7 +47,7 @@ If using in the browser, the server will need to whitelist CORS for `GET`, `HEAD
 const url = new URL("http://www.example.com/test.zip");
 const remoteZip = await new RemoteZipPointer({ url }).populate();
 const fileListing = remoteZip.files(); // RemoteZipFile[]
-const uncompressedBytes = await remoteZip.fetch("test.txt"); // ArrayBuffer
+const uncompressedBytes = await remoteZip.fetch("test.txt"); // Uint8Array
 ```
 
 ### With more features
@@ -72,7 +72,7 @@ const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders);
 <summary>Dev instructions</summary>
 See `scripts` in `package.json` for more scripts.
 
-Requires Node >= 20.
+Requires Node >= 22.
 
 ```bash
 npm ci            # install (reproducible, honours .npmrc cooldown)

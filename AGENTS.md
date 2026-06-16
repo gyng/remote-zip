@@ -6,7 +6,7 @@ changes. It encodes how we want code written here, not just what the code does.
 ## What this project is
 
 `@gyng/remote-zip` lists and fetches **individual files from a remote ZIP over HTTP
-Range requests, without downloading the whole archive**. It runs in both Node (>=20)
+Range requests, without downloading the whole archive**. It runs in both Node (>=22)
 and the browser. The whole library is intentionally small — keep it that way.
 
 The mechanism:
@@ -76,18 +76,19 @@ cleverness — this is a parser; correctness and readability beat micro-optimiza
 ## Commands
 
 ```bash
-yarn build     # type-declarations (tsc) + esbuild esm/cjs bundles into lib/
-yarn test      # run the test suite
-yarn lint      # prettier --check + eslint
-yarn lint:fix  # auto-fix formatting + lint
+npm run build     # type-declarations (tsc) + esbuild esm/cjs bundles into lib/
+npm test          # run the test suite (vitest)
+npm run typecheck # tsc --noEmit, also type-checks the tests
+npm run lint      # prettier --check + eslint
+npm run lint:fix  # auto-fix formatting + lint
 ```
 
-Always run `build`, `lint`, and `test` before considering a change done.
+Always run `build`, `lint`, `typecheck`, and `test` before considering a change done.
 
 ## Code style & conventions
 
 - TypeScript, `strict`. Formatting is owned by Prettier — never hand-format; run
-  `yarn lint:fix`. ESLint config is the source of truth for lint rules.
+  `npm run lint:fix`. ESLint config is the source of truth for lint rules.
 - Parsers read with `DataView`; use the **correct endianness** (ZIP integer fields are
   little-endian) and **unsigned** reads for sizes/offsets. Comment any non-obvious byte
   offset with the field it maps to.
@@ -111,7 +112,7 @@ If `src/zip.ts` grows, split it along the ring boundary (`parse.ts` pure core vs
 ## Definition of done
 
 - [ ] A test that fails without your change and passes with it.
-- [ ] `yarn build && yarn lint && yarn test` all green.
+- [ ] `npm run build && npm run lint && npm run typecheck && npm test` all green.
 - [ ] Public types match runtime behaviour; no new `any` / `@ts-expect-error`.
 - [ ] Untrusted input is validated/bounded.
 - [ ] One concern per commit; README/JSDoc updated if behaviour changed.

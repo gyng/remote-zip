@@ -58,6 +58,13 @@ function createFixtureServer(
     const rangeMatch = /^bytes=(\d+)-(\d*)$/.exec(req.headers["range"] ?? "");
     if (rangeMatch) {
       const start = Number(rangeMatch[1]);
+      // A range that starts at or past EOF is unsatisfiable (RFC 7233 -> 416).
+      if (start >= body.length) {
+        res.statusCode = 416;
+        res.setHeader("Content-Range", `bytes */${body.length}`);
+        res.end();
+        return;
+      }
       const end = rangeMatch[2]
         ? Math.min(Number(rangeMatch[2]), body.length - 1)
         : body.length - 1;

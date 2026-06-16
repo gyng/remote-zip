@@ -2,14 +2,20 @@
   "name": "@gyng/remote-zip",
   "version": "0.2.5",
   "description": "Fetch file listings and individual files from a remote ZIP archive over HTTP Range requests, without downloading the whole archive.",
+  "type": "commonjs",
   "main": "lib/cjs/index.js",
   "module": "lib/esm/index.mjs",
   "types": "lib/types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
-      "import": "./lib/esm/index.mjs",
-      "require": "./lib/cjs/index.js"
+      "import": {
+        "types": "./lib/types/index.d.mts",
+        "default": "./lib/esm/index.mjs"
+      },
+      "require": {
+        "types": "./lib/types/index.d.ts",
+        "default": "./lib/cjs/index.js"
+      }
     },
     "./package.json": "./package.json"
   },
@@ -31,7 +37,7 @@
     "url": "https://github.com/gyng/remote-zip/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "packageManager": "npm@11.11.0",
   "files": [
