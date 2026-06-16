@@ -9,6 +9,7 @@
     "esModuleInterop": true,
     "moduleResolution": "bundler",
     "skipLibCheck": true,
+    "types": ["node"],
     "outDir": "lib"
   },
   "include": ["src/**/*"]
