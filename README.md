@@ -90,7 +90,7 @@ docker-compose -f docker-compose.test.yml up --build
 1. Get an automation token from npm under settings
 
    ```
-   https://www.npmjs.com/settings/aicadium/tokens/
+   https://www.npmjs.com/settings/$YOUR_USERNAME/tokens/
    ```
 
 2. Add the token to your repository secrets.
