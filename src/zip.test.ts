@@ -1,8 +1,9 @@
 import { RemoteZipPointer } from "./zip";
 
-import * as hs from "http-server";
 import * as http from "http";
 import { Server } from "http";
+import { readFileSync } from "fs";
+import { join } from "path";
 import {
   describe,
   it,
@@ -20,25 +21,63 @@ import {
   EndOfCentralDirectory,
 } from ".";
 
+/**
+ * Minimal static file server with HTTP Range support, serving files from `root`.
+ * Replaces the `http-server` dev dependency (which pulled a large, vulnerable
+ * transitive tree) with ~30 lines of the Node standard library. `onRequest` is
+ * invoked for every request so tests can assert on forwarded headers.
+ */
+function createFixtureServer(
+  root: string,
+  onRequest: (req: http.IncomingMessage) => void,
+): Server {
+  return http.createServer((req, res) => {
+    onRequest(req);
+
+    // Mirror http-server: only GET/HEAD are served, everything else is 405.
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
+
+    const path = (req.url ?? "").split("?")[0];
+    let body: Buffer;
+    try {
+      body = readFileSync(join(root, path));
+    } catch {
+      res.statusCode = 404;
+      res.end();
+      return;
+    }
+
+    const isHead = req.method === "HEAD";
+    const rangeMatch = /^bytes=(\d+)-(\d*)$/.exec(req.headers["range"] ?? "");
+    if (rangeMatch) {
+      const start = Number(rangeMatch[1]);
+      const end = rangeMatch[2]
+        ? Math.min(Number(rangeMatch[2]), body.length - 1)
+        : body.length - 1;
+      res.statusCode = 206;
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${body.length}`);
+      res.setHeader("Content-Length", String(end - start + 1));
+      res.end(isHead ? undefined : body.subarray(start, end + 1));
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Length", String(body.length));
+    res.end(isHead ? undefined : body);
+  });
+}
+
 describe("RemoteZip integration tests", () => {
   let server: Server;
   const serverCheck = vi.fn<(req: http.IncomingMessage) => void>();
   const url = new URL("http://127.0.0.1:9875/test.zip");
 
   beforeAll(() => {
-    server = hs.createServer({
-      root: "fixtures",
-      before: [
-        (
-          req: http.IncomingMessage,
-          _res: http.ServerResponse,
-          next: () => void,
-        ) => {
-          serverCheck(req);
-          next();
-        },
-      ],
-    });
+    server = createFixtureServer("fixtures", serverCheck);
     server.listen(9875, "127.0.0.1");
   });
 
