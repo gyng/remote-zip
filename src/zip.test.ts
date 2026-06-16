@@ -23,6 +23,7 @@ import {
   parseOneLocalFile,
   parseZip64EOCD,
   parseZip64EOCDLocator,
+  decodeZipString,
   RemoteZipError,
   EndOfCentralDirectory,
 } from ".";
@@ -453,6 +454,21 @@ function buildMinimalZip(
   return buf;
 }
 
+describe("decodeZipString (CP437 vs UTF-8)", () => {
+  it("decodes CP437 high bytes when the UTF-8 flag is unset", () => {
+    // 0x81 -> ü, 0xe1 -> ß in CP437; ASCII is unchanged.
+    const bytes = new Uint8Array([0x66, 0x81, 0xe1]).buffer; // "f", ü, ß
+    expect(decodeZipString(bytes, false)).toBe("füß");
+  });
+
+  it("decodes UTF-8 when the flag is set", () => {
+    const bytes = new TextEncoder().encode("naïve.txt");
+    expect(decodeZipString(bytes.buffer, true)).toBe("naïve.txt");
+    // The same bytes read as CP437 would mojibake, proving the flag matters.
+    expect(decodeZipString(bytes.buffer, false)).not.toBe("naïve.txt");
+  });
+});
+
 describe("long zip comments", () => {
   it("re-fetches a larger window to find the EOCD past a long comment", async () => {
     // A comment longer than the initial 128-byte EOCD window forces a re-fetch.
@@ -506,6 +522,29 @@ describe("request options", () => {
     }
   });
 
+  it("honours the instance signal even when a per-call signal is given", async () => {
+    const zip = buildMinimalZip();
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    const controller = new AbortController();
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({
+        url,
+        signal: controller.signal,
+      }).populate();
+      controller.abort(); // abort via the INSTANCE signal
+      await expect(
+        // ...while passing an unrelated, un-aborted per-call signal
+        remoteZip.fetch("a.txt", undefined, {
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      server.close();
+    }
+  });
+
   it("respects redirect: 'error'", async () => {
     const server = http.createServer((_req, res) => {
       res.writeHead(302, { Location: "/elsewhere" });
@@ -550,7 +589,7 @@ async function collect(
  * 32-bit size/offset fields are 0xffffffff sentinels, with the real values in
  * ZIP64 extra fields, a ZIP64 EOCD record + locator, and a regular EOCD.
  */
-function buildZip64(): Uint8Array {
+function buildZip64(comment = ""): Uint8Array {
   const enc = new TextEncoder();
   const name = enc.encode("a.txt");
   const data = enc.encode("hi");
@@ -616,13 +655,16 @@ function buildZip64(): Uint8Array {
   locv.setUint32(16, 1, true); // total disks
 
   // Regular EOCD with CD size/offset sentinels (triggers ZIP64 detection).
-  const eocd = new Uint8Array(22);
+  const commentBytes = enc.encode(comment);
+  const eocd = new Uint8Array(22 + commentBytes.length);
   const ev = new DataView(eocd.buffer);
   ev.setUint32(0, 0x504b0506); // signature
   ev.setUint16(8, 1, true); // cd records on this disk
   ev.setUint16(10, 1, true); // total cd records
   ev.setUint32(12, U32, true); // cd size sentinel
   ev.setUint32(16, U32, true); // cd offset sentinel
+  ev.setUint16(20, commentBytes.length, true); // comment length
+  eocd.set(commentBytes, 22);
 
   const parts = [lfh, cd, z64, loc, eocd];
   const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
@@ -668,6 +710,24 @@ describe("ZIP64", () => {
       const cd = remoteZip.centralDirectoryRecords[0].data;
       expect(cd.compressedSize).toBe(2);
       expect(cd.localFileHeaderRelativeOffset).toBe(0);
+      expect(new TextDecoder().decode(await remoteZip.fetch("a.txt"))).toBe(
+        "hi",
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it("handles a ZIP64 archive whose comment pushes the locator past the first window", async () => {
+    // ~100-byte comment: the EOCD lands in the 128-byte window but the preceding
+    // ZIP64 locator does not, forcing a widen (regression for a false reject).
+    const zip = buildZip64("z".repeat(100));
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      expect(remoteZip.files().map((f) => f.filename)).toEqual(["a.txt"]);
       expect(new TextDecoder().decode(await remoteZip.fetch("a.txt"))).toBe(
         "hi",
       );

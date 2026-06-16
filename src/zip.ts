@@ -332,11 +332,15 @@ export class RemoteZip {
     headers?: Headers,
     override?: { signal?: AbortSignal; timeoutMs?: number },
   ): RequestInit {
+    // Combine the instance signal with any per-call signal (both can abort).
+    const signals = [this.signal, override?.signal].filter(
+      Boolean,
+    ) as AbortSignal[];
     return buildRequestInit(
       {
         credentials: this.credentials,
         redirect: this.redirect,
-        signal: override?.signal ?? this.signal,
+        signal: signals.length <= 1 ? signals[0] : AbortSignal.any(signals),
         timeoutMs: override?.timeoutMs ?? this.timeoutMs,
         requestInit: this.requestInit,
       },
@@ -478,6 +482,11 @@ export class RemoteZip {
             controller.enqueue(value);
           }
         } catch (err) {
+          // The generator threw (bad header, inflate failure, or the
+          // maxUncompressedSize cap). Releasing the consumer side via
+          // controller.error() does NOT invoke cancel(), so cancel the
+          // underlying network reader here or the HTTP connection leaks.
+          await reader.cancel(err).catch(() => {});
           controller.error(err);
         }
       },
@@ -741,14 +750,22 @@ const buildRequestInit = (
   options: Omit<RemoteZipRequestOptions, "method">,
   method: string,
   headers?: Headers,
-): RequestInit => ({
-  ...options.requestInit,
-  method,
-  headers,
-  redirect: options.redirect ?? "follow",
-  credentials: options.credentials,
-  signal: combineSignal(options.signal, options.timeoutMs),
-});
+): RequestInit => {
+  // Merge requestInit.headers (the escape hatch) under our per-call Range /
+  // additional headers, so e.g. an Authorization header there is preserved.
+  const merged = new Headers(options.requestInit?.headers);
+  if (headers) {
+    headers.forEach((value, key) => merged.set(key, value));
+  }
+  return {
+    ...options.requestInit,
+    method,
+    headers: merged,
+    redirect: options.redirect ?? options.requestInit?.redirect ?? "follow",
+    credentials: options.credentials,
+    signal: combineSignal(options.signal, options.timeoutMs),
+  };
+};
 
 /**
  * An uninitialised pointer to a remote ZIP file.
@@ -917,6 +934,12 @@ export class RemoteZipPointer {
         if (isZip64(eocd)) {
           const locator = parseZip64EOCDLocator(buffer);
           if (!locator) {
+            // With a long comment the EOCD can land in this window while the
+            // preceding locator does not. Widen to the next window and retry;
+            // only fail if even the widest (whole-file) window lacks it.
+            if (window !== windows[windows.length - 1] && offset > 0) {
+              continue;
+            }
             throw new RemoteZipError(
               "ZIP64 EOCD locator not found",
               "UNSUPPORTED_ZIP64",
@@ -1142,6 +1165,38 @@ export const parseZip64EOCD = (
   return null;
 };
 
+// CP437 (the historical ZIP code page) high half, 0x80–0xFF, as Unicode.
+// prettier-ignore
+const CP437_HIGH = String.fromCharCode(
+  0xc7, 0xfc, 0xe9, 0xe2, 0xe4, 0xe0, 0xe5, 0xe7, 0xea, 0xeb, 0xe8, 0xef, 0xee, 0xec, 0xc4, 0xc5,
+  0xc9, 0xe6, 0xc6, 0xf4, 0xf6, 0xf2, 0xfb, 0xf9, 0xff, 0xd6, 0xdc, 0xa2, 0xa3, 0xa5, 0x20a7, 0x192,
+  0xe1, 0xed, 0xf3, 0xfa, 0xf1, 0xd1, 0xaa, 0xba, 0xbf, 0x2310, 0xac, 0xbd, 0xbc, 0xa1, 0xab, 0xbb,
+  0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556, 0x2555, 0x2563, 0x2551, 0x2557, 0x255d, 0x255c, 0x255b, 0x2510,
+  0x2514, 0x2534, 0x252c, 0x251c, 0x2500, 0x253c, 0x255e, 0x255f, 0x255a, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256c, 0x2567,
+  0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256b, 0x256a, 0x2518, 0x250c, 0x2588, 0x2584, 0x258c, 0x2590, 0x2580,
+  0x3b1, 0xdf, 0x393, 0x3c0, 0x3a3, 0x3c3, 0xb5, 0x3c4, 0x3a6, 0x398, 0x3a9, 0x3b4, 0x221e, 0x3c6, 0x3b5, 0x2229,
+  0x2261, 0xb1, 0x2265, 0x2264, 0x2320, 0x2321, 0xf7, 0x2248, 0xb0, 0x2219, 0xb7, 0x221a, 0x207f, 0xb2, 0x25a0, 0xa0,
+);
+
+/**
+ * Decode a ZIP filename/comment. ZIP entries use CP437 unless general-purpose
+ * bit 11 marks the field as UTF-8; ASCII is identical in both.
+ */
+export const decodeZipString = (bytes: ArrayBuffer, utf8: boolean): string => {
+  if (utf8) {
+    return new TextDecoder().decode(bytes);
+  }
+  let out = "";
+  for (const b of new Uint8Array(bytes)) {
+    out += b < 0x80 ? String.fromCharCode(b) : CP437_HIGH[b - 0x80];
+  }
+  return out;
+};
+
+/** General-purpose bit 11 marks filename/comment fields as UTF-8. */
+const isUtf8Flag = (generalPurposeBitFlag: number): boolean =>
+  Boolean((generalPurposeBitFlag >> 11) & 1);
+
 export const parseAllCDs = (buffer: ArrayBuffer): CentralDirectoryRecord[] => {
   const cds: CentralDirectoryRecord[] = [];
   const view = new DataView(buffer);
@@ -1169,7 +1224,6 @@ export const parseOneCD = (
   const MIN_CD_LENGTH = 46;
 
   const view = new DataView(buffer);
-  const decoder = new TextDecoder();
 
   // Seek to start of central directory
   for (let i = 0; i < buffer.byteLength - MIN_CD_LENGTH; i += 1) {
@@ -1199,6 +1253,8 @@ export const parseOneCD = (
           ? parseZip64Extra(extraField, need)
           : {};
 
+      const utf8 = isUtf8Flag(view.getUint16(i + 8, true));
+
       return {
         meta: {
           length: 46 + filenameLength + extraFieldLength + fileCommentLength,
@@ -1221,15 +1277,17 @@ export const parseOneCD = (
           internalFileAttributes: view.getUint16(i + 36, true),
           externalFileAttributes: view.getUint32(i + 38, true),
           localFileHeaderRelativeOffset: z64.localHeaderOffset ?? rawOffset,
-          filename: decoder.decode(
+          filename: decodeZipString(
             buffer.slice(i + 46, i + 46 + filenameLength),
+            utf8,
           ),
           extraField,
-          fileComment: decoder.decode(
+          fileComment: decodeZipString(
             buffer.slice(
               i + 46 + filenameLength + extraFieldLength,
               i + 46 + filenameLength + extraFieldLength + fileCommentLength,
             ),
+            utf8,
           ),
         },
       };
@@ -1285,7 +1343,6 @@ export const parseOneLocalFile = (
   const MIN_LOCAL_FILE_LENGTH = 30;
 
   const view = new DataView(buffer);
-  const decoder = new TextDecoder();
 
   // Seek to first local file
   for (let i = 0; i <= buffer.byteLength - MIN_LOCAL_FILE_LENGTH; i += 1) {
@@ -1376,8 +1433,9 @@ export const parseOneLocalFile = (
           uncompressedSize,
           filenameLength,
           extraFieldLength,
-          filename: decoder.decode(
+          filename: decodeZipString(
             buffer.slice(i + 30, i + 30 + filenameLength),
+            isUtf8Flag(bitflags),
           ),
           extraField: localExtra,
         },
