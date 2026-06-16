@@ -44,7 +44,22 @@ yarn add @gyng/remote-zip
 
 See the [generated API documentation](https://gyng.github.io/remote-zip/).
 
-If using in the browser, the server will need to whitelist CORS for `GET`, `HEAD`, and the `Range` header.
+### Server requirements (CORS & Range)
+
+The remote server must support **HTTP Range** requests (respond `206 Partial
+Content`). When used cross-origin from a browser, it must also send the right
+CORS headers. The browser issues the CORS preflight (`OPTIONS`) automatically —
+there is nothing to configure on the client — but the server needs to allow it:
+
+- `Access-Control-Allow-Origin: <your origin>`
+- `Access-Control-Allow-Methods: GET, HEAD` (add `POST` if you set a custom `method`)
+- `Access-Control-Allow-Headers: Range` (plus `Authorization` / any custom headers you pass)
+- `Access-Control-Expose-Headers: Content-Length, Content-Range` — **required**, or
+  the browser hides those response headers and `populate()` cannot read the archive size
+
+`Range` is not a CORS-safelisted request header, so any cross-origin request
+triggers a preflight. Static hosts like S3, GitHub Pages, and nginx support Range
+out of the box; you only need to configure the CORS headers above.
 
 ### Basic
 
