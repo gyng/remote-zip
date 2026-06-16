@@ -1,22 +1,38 @@
 import { RemoteZipPointer } from "./zip";
 
 import * as hs from "http-server";
+import * as http from "http";
 import { Server } from "http";
 import { parseZipDatetime } from ".";
 
 describe("RemoteZip integration tests", () => {
   let server: Server;
+  const serverCheck = jest.fn<void, [http.IncomingMessage]>();
   const url = new URL("http://127.0.0.1:9875/test.zip");
 
   beforeAll(() => {
     server = hs.createServer({
       root: "fixtures",
+      before: [
+        (
+          req: http.IncomingMessage,
+          _res: http.ServerResponse,
+          next: () => void
+        ) => {
+          serverCheck(req);
+          next();
+        },
+      ],
     });
     server.listen(9875, "127.0.0.1");
   });
 
   afterAll(() => {
     server.close();
+  });
+
+  beforeEach(() => {
+    serverCheck.mockClear();
   });
 
   describe("RemoteZip", () => {
@@ -45,6 +61,24 @@ describe("RemoteZip integration tests", () => {
       ).rejects.toThrow(
         "Could not fetch remote ZIP at http://127.0.0.1:9875/test.zip: HTTP status 405"
       );
+    });
+
+    it("forwards additional headers to every request (incl. EOCD)", async () => {
+      const additionalHeaders = new Headers();
+      additionalHeaders.append("x-test", "some-value");
+      const remoteZip = await new RemoteZipPointer({
+        url,
+        additionalHeaders,
+      }).populate();
+      await remoteZip.fetch("test.txt", additionalHeaders);
+
+      // Every request the server saw (HEAD, EOCD range, CD range, file range)
+      // must carry the custom header. Before the fix, the EOCD range request
+      // dropped it.
+      expect(serverCheck.mock.calls.length).toBeGreaterThan(0);
+      for (const [request] of serverCheck.mock.calls) {
+        expect(request.headers).toHaveProperty("x-test", "some-value");
+      }
     });
 
     it("provides a friendly listing of files in the zip", async () => {
