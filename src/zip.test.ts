@@ -4,6 +4,15 @@ import * as hs from "http-server";
 import * as http from "http";
 import { Server } from "http";
 import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  vi,
+} from "vitest";
+import {
   parseZipDatetime,
   isZip64,
   parseOneEOCD,
@@ -13,7 +22,7 @@ import {
 
 describe("RemoteZip integration tests", () => {
   let server: Server;
-  const serverCheck = jest.fn<void, [http.IncomingMessage]>();
+  const serverCheck = vi.fn<(req: http.IncomingMessage) => void>();
   const url = new URL("http://127.0.0.1:9875/test.zip");
 
   beforeAll(() => {
