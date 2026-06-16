@@ -32,7 +32,7 @@ describe("RemoteZip integration tests", () => {
         (
           req: http.IncomingMessage,
           _res: http.ServerResponse,
-          next: () => void
+          next: () => void,
         ) => {
           serverCheck(req);
           next();
@@ -62,7 +62,7 @@ describe("RemoteZip integration tests", () => {
     it("errors when fetching a missing file", async () => {
       const remoteZip = await new RemoteZipPointer({ url }).populate();
       await expect(remoteZip.fetch("bad")).rejects.toThrow(
-        "File not found in remote ZIP: bad"
+        "File not found in remote ZIP: bad",
       );
     });
 
@@ -72,9 +72,9 @@ describe("RemoteZip integration tests", () => {
           url,
           additionalHeaders: undefined,
           method: "POST",
-        }).populate()
+        }).populate(),
       ).rejects.toThrow(
-        "Could not fetch remote ZIP at http://127.0.0.1:9875/test.zip: HTTP status 405"
+        "Could not fetch remote ZIP at http://127.0.0.1:9875/test.zip: HTTP status 405",
       );
     });
 
@@ -108,7 +108,7 @@ describe("RemoteZip integration tests", () => {
     it("throws when output exceeds maxUncompressedSize (zip bomb guard)", async () => {
       const remoteZip = await new RemoteZipPointer({ url }).populate();
       await expect(
-        remoteZip.fetch("test.txt", undefined, { maxUncompressedSize: 5 })
+        remoteZip.fetch("test.txt", undefined, { maxUncompressedSize: 5 }),
       ).rejects.toMatchObject({
         name: "RemoteZipError",
         code: "DECOMPRESSION_LIMIT_EXCEEDED",
@@ -142,7 +142,7 @@ describe("RemoteZip integration tests", () => {
 
       expect(remoteZip.contentLength).toBe(863);
       expect(
-        remoteZip.endOfCentralDirectory?.data.centralDirectoryByteOffset
+        remoteZip.endOfCentralDirectory?.data.centralDirectoryByteOffset,
       ).toBe(488);
     });
 
@@ -152,13 +152,13 @@ describe("RemoteZip integration tests", () => {
       expect(remoteZip.centralDirectoryRecords?.length).toBe(4);
       expect(remoteZip.centralDirectoryRecords[0].data.filename).toBe("dir/");
       expect(remoteZip.centralDirectoryRecords[1].data.filename).toBe(
-        "xir/testdir.txt"
+        "xir/testdir.txt",
       );
       expect(remoteZip.centralDirectoryRecords[2].data.filename).toBe(
-        "test.txt"
+        "test.txt",
       );
       expect(remoteZip.centralDirectoryRecords[3].data.filename).toBe(
-        "test-inner.zip"
+        "test-inner.zip",
       );
     });
   });
@@ -191,7 +191,7 @@ describe("parseZipDatetime", () => {
 
 describe("isZip64", () => {
   const eocd = (
-    over: Partial<EndOfCentralDirectory["data"]> = {}
+    over: Partial<EndOfCentralDirectory["data"]> = {},
   ): EndOfCentralDirectory => ({
     meta: {},
     data: {
@@ -219,7 +219,7 @@ describe("isZip64", () => {
     expect(isZip64(eocd({ centralDirectoryRecordCount: 0xffff }))).toBe(true);
     expect(isZip64(eocd({ centralDirectoryByteSize: 0xffffffff }))).toBe(true);
     expect(isZip64(eocd({ centralDirectoryByteOffset: 0xffffffff }))).toBe(
-      true
+      true,
     );
   });
 });
@@ -252,7 +252,7 @@ describe("RemoteZipError", () => {
   it("carries a machine-readable code", () => {
     expect(new RemoteZipError("boom").code).toBe("UNKNOWN");
     expect(new RemoteZipError("boom", "FILE_NOT_FOUND").code).toBe(
-      "FILE_NOT_FOUND"
+      "FILE_NOT_FOUND",
     );
   });
 });
