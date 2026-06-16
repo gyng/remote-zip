@@ -72,10 +72,10 @@ const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders);
 <summary>Dev instructions</summary>
 See `scripts` in `package.json` for more scripts.
 
-- `yarn d` watch and build
-- `yarn t:watch` watch and test
-- `yarn lint`
-- `yarn build`
+- `npm run d` watch and build
+- `npm run t:watch` watch and test
+- `npm run lint`
+- `npm run build`
 
 Run tests and checks with Docker
 

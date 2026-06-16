@@ -25,7 +25,7 @@
   "engines": {
     "node": ">=18"
   },
-  "packageManager": "yarn@1.22.19",
+  "packageManager": "npm@11.11.0",
   "files": [
     "LICENSE",
     "README.md",
@@ -37,18 +37,18 @@
     "url": "git+https://github.com/gyng/remote-zip.git"
   },
   "scripts": {
-    "build": "rm -rf lib/* && yarn ts-types && node ./esbuild.mjs",
+    "build": "rm -rf lib/* && npm run ts-types && node ./esbuild.mjs",
     "d:server": "http-server fixtures",
-    "d": "WATCH=1 yarn build",
-    "doc:gen": "yarn typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
-    "lint:eslint:fix": "yarn lint:eslint --fix",
+    "d": "WATCH=1 npm run build",
+    "doc:gen": "typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
+    "lint:eslint:fix": "npm run lint:eslint -- --fix",
     "lint:eslint": "eslint . --ext .js --ext .jsx --ext .ts --ext .tsx",
-    "lint:fix": "yarn lint:prettier:fix && yarn lint:eslint:fix",
+    "lint:fix": "npm run lint:prettier:fix && npm run lint:eslint:fix",
     "lint:prettier:fix": "prettier --write .",
     "lint:prettier": "prettier --check .",
-    "lint": "yarn lint:prettier && yarn lint:eslint",
+    "lint": "npm run lint:prettier && npm run lint:eslint",
     "t:watch": "vitest",
-    "t": "yarn test",
+    "t": "npm test",
     "test:coverage": "vitest run --coverage",
     "test": "vitest run",
     "ts-types": "tsc -p tsconfig.build.json"
