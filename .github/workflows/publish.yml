@@ -38,7 +38,7 @@ jobs:
           test -f lib/types/index.d.ts
 
       - name: Attest build provenance for the shipped bundles
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "lib/**/*"
 
