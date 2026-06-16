@@ -15,7 +15,7 @@ untrusted** origin. Treat everything the archive tells you as attacker-controlle
   bomb"). `RemoteZip.fetch` accepts a `maxUncompressedSize` cap; set it when handling
   untrusted archives to bound memory use.
 - **Header fields** (sizes, offsets, lengths, comments): the central-directory offset and
-  size are bounds-checked against the archive length, and ZIP64 archives are rejected.
+  size are bounds-checked against the archive length (including resolved ZIP64 values).
   Per-entry local-header offsets are not yet fully validated, so still set sane limits at
   the call site (e.g. `maxUncompressedSize`).
 - **Entry names**: filenames are returned verbatim and may contain path-traversal

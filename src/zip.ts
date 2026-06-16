@@ -84,6 +84,16 @@ const mapCryptoError = (err: CryptoError): RemoteZipError => {
   }
 };
 
+/** Throw a typed HTTP error for a non-success response. */
+const assertResponseOk = (status: number, url: URL): void => {
+  if (status < 200 || status >= 400) {
+    throw new RemoteZipError(
+      `Could not fetch remote ZIP at ${url}: HTTP status ${status}`,
+      "HTTP_ERROR",
+    );
+  }
+};
+
 export interface EndOfCentralDirectory {
   meta: Record<string, unknown>;
   data: {
@@ -679,6 +689,7 @@ export class RemoteZip {
         timeoutMs: options?.timeoutMs,
       }),
     );
+    assertResponseOk(response.status, this.url);
     return { file, response };
   }
 }
@@ -1001,6 +1012,7 @@ export class RemoteZipPointer {
       this.headUrl.toString(),
       this.requestInitFor("HEAD", this.additionalHeaders),
     );
+    assertResponseOk(res.status, this.headUrl);
     const contentLengthRaw = res.headers.get("content-length");
     if (!contentLengthRaw) {
       throw new RemoteZipError(
@@ -1056,12 +1068,7 @@ export class RemoteZipPointer {
         this.url.toString(),
         this.requestInitFor(this.method, eocdHeaders),
       );
-      if (eocdRes.status < 200 || eocdRes.status >= 400) {
-        throw new RemoteZipError(
-          `Could not fetch remote ZIP at ${this.url}: HTTP status ${eocdRes.status}`,
-          "HTTP_ERROR",
-        );
-      }
+      assertResponseOk(eocdRes.status, this.url);
 
       const buffer = await eocdRes.arrayBuffer();
       const eocd = parseOneEOCD(buffer);
@@ -1127,6 +1134,7 @@ export class RemoteZipPointer {
       this.url.toString(),
       this.requestInitFor(this.method, headers),
     );
+    assertResponseOk(res.status, this.url);
     const z64 = parseZip64EOCD(await res.arrayBuffer());
     if (!z64) {
       throw new RemoteZipError(
@@ -1148,6 +1156,7 @@ export class RemoteZipPointer {
       this.url.toString(),
       this.requestInitFor(this.method, cdHeaders),
     );
+    assertResponseOk(cdRes.status, this.url);
     const cdBuffer = await cdRes.arrayBuffer();
     return parseAllCDs(cdBuffer);
   }
