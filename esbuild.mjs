@@ -17,6 +17,9 @@ const esmOptions = {
   format: "esm",
   splitting: true,
   target: ["esnext"],
+  // Emit .mjs so the bundle is unambiguously ESM regardless of the package
+  // "type" field; the cjs build keeps .js (the package default is CommonJS).
+  outExtension: { ".js": ".mjs" },
 };
 
 /** @type {import("esbuild").BuildOptions} */

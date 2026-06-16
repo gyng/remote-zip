@@ -683,9 +683,7 @@ export const isZip64 = (eocd: EndOfCentralDirectory): boolean =>
   eocd.data.centralDirectoryByteSize === 0xffffffff ||
   eocd.data.centralDirectoryByteOffset === 0xffffffff;
 
-export const parseAllCDs = (
-  buffer: ArrayBufferLike,
-): CentralDirectoryRecord[] => {
+export const parseAllCDs = (buffer: ArrayBuffer): CentralDirectoryRecord[] => {
   const cds: CentralDirectoryRecord[] = [];
   const view = new DataView(buffer);
 
@@ -707,7 +705,7 @@ export const parseAllCDs = (
 };
 
 export const parseOneCD = (
-  buffer: ArrayBufferLike,
+  buffer: ArrayBuffer,
 ): CentralDirectoryRecord | null => {
   const MIN_CD_LENGTH = 46;
 
@@ -765,7 +763,7 @@ export const parseOneCD = (
 };
 
 export const parseOneEOCD = (
-  buffer: ArrayBufferLike,
+  buffer: ArrayBuffer,
 ): EndOfCentralDirectory | null => {
   const MIN_EOCD_LENGTH = 22;
 
@@ -801,7 +799,7 @@ export const parseOneEOCD = (
 };
 
 export const parseOneLocalFile = (
-  buffer: ArrayBufferLike,
+  buffer: ArrayBuffer,
   /** Sometimes, the local header does not have the compressed size and a data descriptor is used after the compressed data.
    * If provided, will be used if the local header indicates a data descriptor block.
    * It is used to find the correct offset for the data descriptor. */
