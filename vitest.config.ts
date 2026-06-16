@@ -9,6 +9,14 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts"],
       reporter: ["text", "html"],
+      // Gate in CI (`npm run test:coverage`). Set below current levels so the
+      // gate catches regressions without being brittle on small fluctuations.
+      thresholds: {
+        statements: 90,
+        branches: 72,
+        functions: 95,
+        lines: 90,
+      },
     },
   },
 });

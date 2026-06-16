@@ -17,6 +17,9 @@ import {
   parseZipDatetime,
   isZip64,
   parseOneEOCD,
+  parseOneCD,
+  parseAllCDs,
+  parseOneLocalFile,
   RemoteZipError,
   EndOfCentralDirectory,
 } from ".";
@@ -293,5 +296,70 @@ describe("RemoteZipError", () => {
     expect(new RemoteZipError("boom", "FILE_NOT_FOUND").code).toBe(
       "FILE_NOT_FOUND",
     );
+  });
+});
+
+describe("parseOneLocalFile", () => {
+  it("parses a stored (uncompressed) local file header", () => {
+    const name = "a.txt";
+    const data = "hello";
+    const buf = new ArrayBuffer(30 + name.length + data.length);
+    const dv = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+    dv.setUint32(0, 0x504b0304); // local file header signature
+    dv.setUint16(4, 20, true); // version to extract
+    dv.setUint16(6, 0, true); // general purpose flags (no data descriptor)
+    dv.setUint16(8, 0, true); // compression method = store
+    dv.setUint32(18, data.length, true); // compressed size
+    dv.setUint32(22, data.length, true); // uncompressed size
+    dv.setUint16(26, name.length, true); // filename length
+    dv.setUint16(28, 0, true); // extra field length
+    bytes.set(
+      [...name].map((c) => c.charCodeAt(0)),
+      30,
+    );
+    bytes.set(
+      [...data].map((c) => c.charCodeAt(0)),
+      30 + name.length,
+    );
+
+    const parsed = parseOneLocalFile(buf);
+    expect(parsed?.data.filename).toBe("a.txt");
+    expect(parsed?.data.compressionMethod).toBe(0);
+    expect(new TextDecoder().decode(parsed?.meta.compressedData)).toBe("hello");
+  });
+
+  it("returns null when there is no local file header signature", () => {
+    expect(parseOneLocalFile(new ArrayBuffer(64))).toBeNull();
+  });
+});
+
+describe("parseAllCDs / parseOneCD", () => {
+  // Build one central directory record (filename "a") followed by an EOCD
+  // signature, so parseAllCDs parses the record and stops at the EOCD.
+  const buildCd = (): ArrayBuffer => {
+    const name = "a";
+    const buf = new ArrayBuffer(46 + name.length + 4);
+    const dv = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+    dv.setUint32(0, 0x504b0102); // central directory signature
+    dv.setUint16(28, name.length, true); // filename length
+    dv.setUint16(30, 0, true); // extra field length
+    dv.setUint16(32, 0, true); // file comment length
+    dv.setUint32(42, 1234, true); // local file header relative offset
+    bytes.set([name.charCodeAt(0)], 46);
+    dv.setUint32(46 + name.length, 0x504b0506); // trailing EOCD signature
+    return buf;
+  };
+
+  it("parses a single record and stops at the EOCD signature", () => {
+    const cds = parseAllCDs(buildCd());
+    expect(cds).toHaveLength(1);
+    expect(cds[0].data.filename).toBe("a");
+    expect(cds[0].data.localFileHeaderRelativeOffset).toBe(1234);
+  });
+
+  it("parseOneCD returns null when no record is present", () => {
+    expect(parseOneCD(new ArrayBuffer(64))).toBeNull();
   });
 });
