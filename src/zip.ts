@@ -2,7 +2,7 @@
 // https://rhardih.io/2021/04/listing-the-contents-of-a-remote-zip-archive-without-downloading-the-entire-file/
 
 import fetch from "cross-fetch";
-import { inflateRaw } from "pako";
+import { inflateRaw, Inflate } from "pako";
 
 // ZIP file signatures
 const SIG_CD = 0x504b0102;
@@ -10,10 +10,26 @@ const SIG_LOCAL_FILE_HEADER = 0x504b0304;
 const SIG_EOCD = 0x504b0506;
 const SIG_DATA_DESCRIPTOR = 0x504b0708;
 
+/** Machine-readable discriminant for {@link RemoteZipError}. */
+export type RemoteZipErrorCode =
+  | "UNKNOWN"
+  | "CONTENT_LENGTH_MISSING"
+  | "HTTP_ERROR"
+  | "EOCD_NOT_FOUND"
+  | "UNSUPPORTED_ZIP64"
+  | "UNSUPPORTED_ENCRYPTION"
+  | "FILE_NOT_FOUND"
+  | "LOCAL_HEADER_PARSE_FAILED"
+  | "DECOMPRESSION_LIMIT_EXCEEDED";
+
 export class RemoteZipError extends Error {
-  constructor(message) {
+  /** Machine-readable error code, for programmatic handling without matching on `message`. */
+  code: RemoteZipErrorCode;
+
+  constructor(message: string, code: RemoteZipErrorCode = "UNKNOWN") {
     super(message);
     this.name = this.constructor.name;
+    this.code = code;
   }
 }
 
@@ -34,9 +50,9 @@ export interface EndOfCentralDirectory {
     centralDirectoryByteSize: number;
     /** Offset of start of central directory, relative to start of archive (or 0xffffffff for ZIP64) */
     centralDirectoryByteOffset: number;
-    /** Comment length (n) */
-    comment: string;
     /** Comment */
+    comment: string;
+    /** Comment length (n) */
     commentLength: number;
   };
 }
@@ -316,13 +332,17 @@ export class RemoteZip {
    *
    * @param path Path of the file in the remote ZIP archive
    * @param additionalHeaders Additional headers, if any, to be passed to the `fetch` request
+   * @param options.maxUncompressedSize If set, inflation aborts and throws once the
+   *   decompressed output would exceed this many bytes. Set this when handling
+   *   untrusted archives to guard against decompression bombs.
    * @returns Inflated (uncompressed) bytes of the requested file
-   * @throws [RemoteZipError](RemoteZipError) if it fails to parse or fetch
+   * @throws [RemoteZipError](RemoteZipError) if it fails to parse, fetch, or exceeds limits
    */
   public async fetch(
     path: string,
-    additionalHeaders?: Headers
-  ): Promise<ArrayBuffer> {
+    additionalHeaders?: Headers,
+    options?: { maxUncompressedSize?: number }
+  ): Promise<Uint8Array> {
     // TODO: Return a ReadableStream instead of an ArrayBuffer so we don't need
     // to download the entire thing (to show video previews, for example)
     // Can't use WHATWG ReadableStream in node, so we avoid using streams until at least node-fetch v3
@@ -333,7 +353,19 @@ export class RemoteZip {
       (r) => r.data.filename === path
     );
     if (!file) {
-      throw new RemoteZipError(`File not found in remote ZIP: ${path}`);
+      throw new RemoteZipError(
+        `File not found in remote ZIP: ${path}`,
+        "FILE_NOT_FOUND"
+      );
+    }
+
+    // Bit 0 of the general-purpose flag marks an encrypted entry. We cannot
+    // decrypt, and feeding ciphertext to inflate fails opaquely, so reject early.
+    if (file.data.generalPurposeBitFlag & 0x1) {
+      throw new RemoteZipError(
+        `Encrypted ZIP entries are not supported: ${path}`,
+        "UNSUPPORTED_ENCRYPTION"
+      );
     }
 
     // @ts-expect-error polyfill types
@@ -366,21 +398,82 @@ export class RemoteZip {
       file.data.compressedSize
     );
     if (!localFile) {
-      throw new RemoteZipError("cannot parse local file header in remote ZIP");
+      throw new RemoteZipError(
+        "cannot parse local file header in remote ZIP",
+        "LOCAL_HEADER_PARSE_FAILED"
+      );
     }
 
-    // 0 = uncompressed, 8 = deflate
+    const compressed = new Uint8Array(localFile.meta.compressedData);
+    const max = options?.maxUncompressedSize;
+
+    // 0 = stored (uncompressed), 8 = deflate. Treat anything else as raw DEFLATE.
     if (localFile.data.compressionMethod === 0) {
-      return localFile.meta.compressedData;
-    } else {
-      // Try DEFLATE anyway
-      const uncompressed = inflateRaw(
-        new Uint8Array(localFile.meta.compressedData)
-      );
-      return uncompressed;
+      if (max !== undefined && compressed.byteLength > max) {
+        throw new RemoteZipError(
+          `Uncompressed size exceeds maxUncompressedSize (${max} bytes)`,
+          "DECOMPRESSION_LIMIT_EXCEEDED"
+        );
+      }
+      return compressed;
     }
+
+    return inflateRawCapped(compressed, max);
   }
 }
+
+/**
+ * Raw-inflates `data`, aborting with a {@link RemoteZipError} if the decompressed
+ * output would exceed `maxBytes`. When `maxBytes` is undefined, inflation is
+ * unbounded (back-compat). Uses pako's streaming inflater so we can stop before
+ * materialising the full output — the defense against decompression bombs.
+ */
+const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
+  if (maxBytes === undefined) {
+    return inflateRaw(data);
+  }
+
+  const inflator = new Inflate({ raw: true });
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let exceeded = false;
+
+  inflator.onData = (chunk) => {
+    if (exceeded) {
+      return;
+    }
+    const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    total += bytes.length;
+    if (total > maxBytes) {
+      exceeded = true;
+      return;
+    }
+    chunks.push(bytes);
+  };
+
+  inflator.push(data, true);
+
+  if (exceeded) {
+    throw new RemoteZipError(
+      `Decompressed size exceeds maxUncompressedSize (${maxBytes} bytes)`,
+      "DECOMPRESSION_LIMIT_EXCEEDED"
+    );
+  }
+  if (inflator.err) {
+    throw new RemoteZipError(
+      `Failed to inflate remote ZIP entry: ${inflator.msg}`,
+      "UNKNOWN"
+    );
+  }
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+};
 
 /**
  * An uninitialised pointer to a remote ZIP file.
@@ -446,7 +539,10 @@ export class RemoteZipPointer {
     });
     const contentLengthRaw = res.headers.get("content-length");
     if (!contentLengthRaw) {
-      throw new RemoteZipError("Could not get Content-Length of URL");
+      throw new RemoteZipError(
+        "Could not get Content-Length of URL",
+        "CONTENT_LENGTH_MISSING"
+      );
     }
     const contentLength = Number.parseInt(contentLengthRaw, 10);
     const endOfCentralDirectory = await this.fetchEndOfCentralDirectory(
@@ -488,26 +584,31 @@ export class RemoteZipPointer {
     });
     if (eocdRes.status < 200 || eocdRes.status >= 400) {
       throw new RemoteZipError(
-        `Could not fetch remote ZIP at ${this.url}: HTTP status ${eocdRes.status}`
+        `Could not fetch remote ZIP at ${this.url}: HTTP status ${eocdRes.status}`,
+        "HTTP_ERROR"
       );
     }
 
     const eocdBuffer = await eocdRes.arrayBuffer();
     if (!eocdBuffer) {
       throw new RemoteZipError(
-        "Could not get Range request to start looking for EOCD"
+        "Could not get Range request to start looking for EOCD",
+        "EOCD_NOT_FOUND"
       );
     }
     const eocd = parseOneEOCD(eocdBuffer);
 
-    // 0xffff = ZIP64
     if (!eocd) {
-      throw new RemoteZipError("Could not get EOCD record of remote ZIP");
+      throw new RemoteZipError(
+        "Could not get EOCD record of remote ZIP",
+        "EOCD_NOT_FOUND"
+      );
     }
 
-    if (eocd.data.cdDisk === 0xffff) {
+    if (isZip64(eocd)) {
       throw new RemoteZipError(
-        "ZIP file not supported: could not get EOCD record or ZIP64"
+        "ZIP64 archives are not supported",
+        "UNSUPPORTED_ZIP64"
       );
     }
 
@@ -565,17 +666,31 @@ export const parseZipDatetime = (zipDate: number, zipTime: number): string => {
     minute
   )}:${pad(second)}`;
 
-  try {
-    Date.parse(stringFormat);
-  } catch (e) {
-    // If date is invalid, return 0 instead
+  // Date.parse returns NaN (it never throws) for invalid component values such
+  // as month 13 or second 62, both of which the DOS bit layout can produce.
+  if (Number.isNaN(Date.parse(stringFormat))) {
     return parseZipDatetime(0, 0);
   }
 
   return stringFormat;
 };
 
-const parseAllCDs = (buffer: ArrayBufferLike): CentralDirectoryRecord[] => {
+/**
+ * Detects whether an EOCD record points at ZIP64 structures this library does
+ * not parse yet. Any ZIP64 sentinel value (`0xffff` for 16-bit fields,
+ * `0xffffffff` for 32-bit fields) means the real value lives in a ZIP64 EOCD.
+ */
+export const isZip64 = (eocd: EndOfCentralDirectory): boolean =>
+  eocd.data.diskNumber === 0xffff ||
+  eocd.data.cdDisk === 0xffff ||
+  eocd.data.centralDirectoryDiskNumber === 0xffff ||
+  eocd.data.centralDirectoryRecordCount === 0xffff ||
+  eocd.data.centralDirectoryByteSize === 0xffffffff ||
+  eocd.data.centralDirectoryByteOffset === 0xffffffff;
+
+export const parseAllCDs = (
+  buffer: ArrayBufferLike
+): CentralDirectoryRecord[] => {
   const cds: CentralDirectoryRecord[] = [];
   const view = new DataView(buffer);
 
@@ -596,7 +711,9 @@ const parseAllCDs = (buffer: ArrayBufferLike): CentralDirectoryRecord[] => {
   return cds;
 };
 
-const parseOneCD = (buffer: ArrayBufferLike): CentralDirectoryRecord | null => {
+export const parseOneCD = (
+  buffer: ArrayBufferLike
+): CentralDirectoryRecord | null => {
   const MIN_CD_LENGTH = 46;
 
   const view = new DataView(buffer);
@@ -652,7 +769,7 @@ const parseOneCD = (buffer: ArrayBufferLike): CentralDirectoryRecord | null => {
   return null;
 };
 
-const parseOneEOCD = (
+export const parseOneEOCD = (
   buffer: ArrayBufferLike
 ): EndOfCentralDirectory | null => {
   const MIN_EOCD_LENGTH = 22;
@@ -660,10 +777,12 @@ const parseOneEOCD = (
   const view = new DataView(buffer);
   const decoder = new TextDecoder();
 
-  // Seek to end of central directory record
-  for (let i = 0; i <= buffer.byteLength - MIN_EOCD_LENGTH; i += 1) {
+  // The real EOCD is the LAST occurrence of the signature in the file — a zip
+  // comment can legitimately contain bytes that look like the signature — so
+  // scan backwards from the end of the buffer and return the first hit.
+  for (let i = buffer.byteLength - MIN_EOCD_LENGTH; i >= 0; i -= 1) {
     if (view.getUint32(i) === SIG_EOCD) {
-      const commentLength = view.getUint16(i + 20, false);
+      const commentLength = view.getUint16(i + 20, true);
 
       // https://en.wikipedia.org/wiki/ZIP_(file_format)#End_of_central_directory_record_(EOCD)
       return {
@@ -674,8 +793,8 @@ const parseOneEOCD = (
           cdDisk: view.getUint16(i + 6, true),
           centralDirectoryDiskNumber: view.getUint16(i + 8, true),
           centralDirectoryRecordCount: view.getUint16(i + 10, true),
-          centralDirectoryByteSize: view.getInt32(i + 12, true),
-          centralDirectoryByteOffset: view.getInt32(i + 16, true),
+          centralDirectoryByteSize: view.getUint32(i + 12, true),
+          centralDirectoryByteOffset: view.getUint32(i + 16, true),
           commentLength: commentLength,
           comment: decoder.decode(buffer.slice(i + 22, i + 22 + commentLength)),
         },
@@ -686,7 +805,7 @@ const parseOneEOCD = (
   return null;
 };
 
-const parseOneLocalFile = (
+export const parseOneLocalFile = (
   buffer: ArrayBufferLike,
   /** Sometimes, the local header does not have the compressed size and a data descriptor is used after the compressed data.
    * If provided, will be used if the local header indicates a data descriptor block.
