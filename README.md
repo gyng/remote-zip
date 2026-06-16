@@ -8,8 +8,9 @@ Fetch file listings and individual files from a remote ZIP file.
 
 Without downloading the entire ZIP:
 
-- Fetch individual files in a remote ZIP
+- Fetch individual files in a remote ZIP (buffered or streaming)
 - Fetch file listings
+- ZIP64 archives (>4 GiB / >65,535 entries)
 
 The gist of what the library does is:
 
@@ -20,8 +21,8 @@ The gist of what the library does is:
 
 ## Limitations
 
-- No ZIP64 support (ZIP64 archives are detected and rejected with a typed error)
 - No encrypted ZIP support (encrypted entries are detected and rejected)
+- Multi-disk / split archives are not supported
 
 ## Install
 

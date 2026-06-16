@@ -8,6 +8,12 @@ const SIG_CD = 0x504b0102;
 const SIG_LOCAL_FILE_HEADER = 0x504b0304;
 const SIG_EOCD = 0x504b0506;
 const SIG_DATA_DESCRIPTOR = 0x504b0708;
+const SIG_ZIP64_EOCD = 0x504b0606;
+const SIG_ZIP64_EOCD_LOCATOR = 0x504b0607;
+/** ZIP64 sentinel: a 32-bit field equal to this lives in the ZIP64 extra field. */
+const ZIP64_U32_SENTINEL = 0xffffffff;
+/** ZIP64 sentinel for 16-bit fields (e.g. disk numbers). */
+const ZIP64_U16_SENTINEL = 0xffff;
 
 /** Machine-readable discriminant for {@link RemoteZipError}. */
 export type RemoteZipErrorCode =
@@ -846,19 +852,20 @@ export class RemoteZipPointer {
       );
     }
     const contentLength = Number.parseInt(contentLengthRaw, 10);
-    const endOfCentralDirectory = await this.fetchEndOfCentralDirectory(
+    const { eocd, cdOffset, cdSize } = await this.fetchEndOfCentralDirectory(
       contentLength,
       this.additionalHeaders,
     );
     const centralDirectoryRecords = await this.fetchCentralDirectoryRecords(
-      endOfCentralDirectory,
+      cdOffset,
+      cdSize,
       this.additionalHeaders,
     );
 
     return new RemoteZip({
       url: this.url,
       contentLength,
-      endOfCentralDirectory,
+      endOfCentralDirectory: eocd,
       centralDirectoryRecords,
       method: this.method,
       credentials: this.credentials,
@@ -872,11 +879,16 @@ export class RemoteZipPointer {
   private async fetchEndOfCentralDirectory(
     zipByteLength: number,
     additionalHeaders?: Headers,
-  ): Promise<EndOfCentralDirectory> {
-    // The EOCD is 22 bytes plus an optional comment of up to 65535 bytes. Try a
-    // small trailing window first (covers the common no/short-comment case), and
-    // only re-fetch the maximum-size window if the signature isn't found there.
-    const MAX_EOCD_BYTES = 22 + 0xffff;
+  ): Promise<{
+    eocd: EndOfCentralDirectory;
+    cdOffset: number;
+    cdSize: number;
+  }> {
+    // The EOCD is 22 bytes plus an optional comment of up to 65535 bytes,
+    // optionally preceded by a 20-byte ZIP64 locator. Try a small trailing
+    // window first (the common no/short-comment case), then re-fetch the
+    // maximum-size window if the signature isn't found there.
+    const MAX_EOCD_BYTES = 20 + 22 + 0xffff;
     const windows = [128, MAX_EOCD_BYTES];
 
     for (const window of windows) {
@@ -894,21 +906,32 @@ export class RemoteZipPointer {
         );
       }
 
-      const eocd = parseOneEOCD(await eocdRes.arrayBuffer());
+      const buffer = await eocdRes.arrayBuffer();
+      const eocd = parseOneEOCD(buffer);
       if (eocd) {
+        let cdOffset = eocd.data.centralDirectoryByteOffset;
+        let cdSize = eocd.data.centralDirectoryByteSize;
+
+        // ZIP64: the real CD offset/size live in the ZIP64 EOCD record, located
+        // via the ZIP64 EOCD locator (the 20 bytes preceding the EOCD).
         if (isZip64(eocd)) {
-          throw new RemoteZipError(
-            "ZIP64 archives are not supported",
-            "UNSUPPORTED_ZIP64",
+          const locator = parseZip64EOCDLocator(buffer);
+          if (!locator) {
+            throw new RemoteZipError(
+              "ZIP64 EOCD locator not found",
+              "UNSUPPORTED_ZIP64",
+            );
+          }
+          const z64 = await this.fetchZip64EOCD(
+            locator.zip64EOCDOffset,
+            additionalHeaders,
           );
+          cdOffset = z64.centralDirectoryByteOffset;
+          cdSize = z64.centralDirectoryByteSize;
         }
 
         // The central directory must lie within the archive. Reject out-of-bounds
         // offsets/sizes before we use them to build a Range request.
-        const {
-          centralDirectoryByteOffset: cdOffset,
-          centralDirectoryByteSize: cdSize,
-        } = eocd.data;
         if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > zipByteLength) {
           throw new RemoteZipError(
             `Central directory is out of bounds (offset ${cdOffset}, size ${cdSize}, archive ${zipByteLength} bytes)`,
@@ -916,7 +939,7 @@ export class RemoteZipPointer {
           );
         }
 
-        return eocd;
+        return { eocd, cdOffset, cdSize };
       }
 
       // Not found in this window. If we already fetched from the start of the
@@ -930,27 +953,40 @@ export class RemoteZipPointer {
     );
   }
 
+  private async fetchZip64EOCD(
+    offset: number,
+    additionalHeaders?: Headers,
+  ): Promise<Zip64EndOfCentralDirectory> {
+    const headers = new Headers(additionalHeaders);
+    // The fixed part of the ZIP64 EOCD record is 56 bytes.
+    headers.append("Range", `bytes=${offset}-${offset + 56}`);
+    const res = await fetch(
+      this.url.toString(),
+      this.requestInitFor(this.method, headers),
+    );
+    const z64 = parseZip64EOCD(await res.arrayBuffer());
+    if (!z64) {
+      throw new RemoteZipError(
+        "ZIP64 EOCD record not found",
+        "UNSUPPORTED_ZIP64",
+      );
+    }
+    return z64;
+  }
+
   private async fetchCentralDirectoryRecords(
-    endOfCentralDirectory: EndOfCentralDirectory,
+    cdOffset: number,
+    cdSize: number,
     additionalHeaders?: Headers,
   ): Promise<CentralDirectoryRecord[]> {
-    // Fetch CD
     const cdHeaders = new Headers(additionalHeaders);
-    cdHeaders.append(
-      "Range",
-      `bytes=${endOfCentralDirectory.data.centralDirectoryByteOffset}-${
-        endOfCentralDirectory.data.centralDirectoryByteOffset +
-        endOfCentralDirectory.data.centralDirectoryByteSize
-      }`,
-    );
+    cdHeaders.append("Range", `bytes=${cdOffset}-${cdOffset + cdSize}`);
     const cdRes = await fetch(
       this.url.toString(),
       this.requestInitFor(this.method, cdHeaders),
     );
     const cdBuffer = await cdRes.arrayBuffer();
-    const cd = parseAllCDs(cdBuffer);
-
-    return cd;
+    return parseAllCDs(cdBuffer);
   }
 }
 
@@ -993,12 +1029,118 @@ export const parseZipDatetime = (zipDate: number, zipTime: number): string => {
  * `0xffffffff` for 32-bit fields) means the real value lives in a ZIP64 EOCD.
  */
 export const isZip64 = (eocd: EndOfCentralDirectory): boolean =>
-  eocd.data.diskNumber === 0xffff ||
-  eocd.data.cdDisk === 0xffff ||
-  eocd.data.centralDirectoryDiskNumber === 0xffff ||
-  eocd.data.centralDirectoryRecordCount === 0xffff ||
-  eocd.data.centralDirectoryByteSize === 0xffffffff ||
-  eocd.data.centralDirectoryByteOffset === 0xffffffff;
+  eocd.data.diskNumber === ZIP64_U16_SENTINEL ||
+  eocd.data.cdDisk === ZIP64_U16_SENTINEL ||
+  eocd.data.centralDirectoryDiskNumber === ZIP64_U16_SENTINEL ||
+  eocd.data.centralDirectoryRecordCount === ZIP64_U16_SENTINEL ||
+  eocd.data.centralDirectoryByteSize === ZIP64_U32_SENTINEL ||
+  eocd.data.centralDirectoryByteOffset === ZIP64_U32_SENTINEL;
+
+/** Effective central-directory location from a ZIP64 End Of Central Directory record. */
+export interface Zip64EndOfCentralDirectory {
+  centralDirectoryRecordCount: number;
+  centralDirectoryByteSize: number;
+  centralDirectoryByteOffset: number;
+}
+
+/**
+ * Read a little-endian 64-bit unsigned int as a JS number, rejecting values
+ * beyond `Number.MAX_SAFE_INTEGER` (≈8 PB — far past any real archive).
+ */
+const readUint64 = (view: DataView, offset: number): number => {
+  const value = view.getBigUint64(offset, true);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RemoteZipError(
+      `ZIP64 value ${value} exceeds Number.MAX_SAFE_INTEGER`,
+      "UNSUPPORTED_ZIP64",
+    );
+  }
+  return Number(value);
+};
+
+/**
+ * Parse the ZIP64 extra field (header id 0x0001) from an entry's extra-field
+ * bytes. Only the fields whose 32-bit value was the sentinel are present, in the
+ * fixed order: uncompressed size, compressed size, local-header offset, disk.
+ */
+const parseZip64Extra = (
+  extra: ArrayBuffer,
+  need: {
+    uncompressed: boolean;
+    compressed: boolean;
+    offset: boolean;
+    disk: boolean;
+  },
+): {
+  uncompressedSize?: number;
+  compressedSize?: number;
+  localHeaderOffset?: number;
+  diskStart?: number;
+} => {
+  const view = new DataView(extra);
+  for (let p = 0; p + 4 <= extra.byteLength; ) {
+    const headerId = view.getUint16(p, true);
+    const size = view.getUint16(p + 2, true);
+    const dataStart = p + 4;
+    if (headerId === 0x0001) {
+      const result: {
+        uncompressedSize?: number;
+        compressedSize?: number;
+        localHeaderOffset?: number;
+        diskStart?: number;
+      } = {};
+      let q = dataStart;
+      if (need.uncompressed) {
+        result.uncompressedSize = readUint64(view, q);
+        q += 8;
+      }
+      if (need.compressed) {
+        result.compressedSize = readUint64(view, q);
+        q += 8;
+      }
+      if (need.offset) {
+        result.localHeaderOffset = readUint64(view, q);
+        q += 8;
+      }
+      if (need.disk) {
+        result.diskStart = view.getUint32(q, true);
+      }
+      return result;
+    }
+    p = dataStart + size;
+  }
+  return {};
+};
+
+/** Locate the ZIP64 EOCD locator in a tail buffer and return the ZIP64 EOCD offset. */
+export const parseZip64EOCDLocator = (
+  buffer: ArrayBuffer,
+): { zip64EOCDOffset: number } | null => {
+  const view = new DataView(buffer);
+  for (let i = buffer.byteLength - 20; i >= 0; i -= 1) {
+    if (view.getUint32(i) === SIG_ZIP64_EOCD_LOCATOR) {
+      return { zip64EOCDOffset: readUint64(view, i + 8) };
+    }
+  }
+  return null;
+};
+
+/** Parse a ZIP64 End Of Central Directory record (the real CD offset/size/count). */
+export const parseZip64EOCD = (
+  buffer: ArrayBuffer,
+): Zip64EndOfCentralDirectory | null => {
+  const view = new DataView(buffer);
+  for (let i = 0; i <= buffer.byteLength - 56; i += 1) {
+    if (view.getUint32(i) === SIG_ZIP64_EOCD) {
+      return {
+        centralDirectoryRecordCount: readUint64(view, i + 32),
+        centralDirectoryByteSize: readUint64(view, i + 40),
+        centralDirectoryByteOffset: readUint64(view, i + 48),
+      };
+    }
+  }
+  return null;
+};
 
 export const parseAllCDs = (buffer: ArrayBuffer): CentralDirectoryRecord[] => {
   const cds: CentralDirectoryRecord[] = [];
@@ -1036,6 +1178,27 @@ export const parseOneCD = (
       const extraFieldLength = view.getUint16(i + 30, true); // m
       const fileCommentLength = view.getUint16(i + 32, true); // k
 
+      const rawCompressedSize = view.getUint32(i + 20, true);
+      const rawUncompressedSize = view.getUint32(i + 24, true);
+      const rawDisk = view.getUint16(i + 34, true);
+      const rawOffset = view.getUint32(i + 42, true);
+      const extraField = buffer.slice(
+        i + 46 + filenameLength,
+        i + 46 + filenameLength + extraFieldLength,
+      );
+
+      // ZIP64: any 0xffffffff / 0xffff field has its real value in the extra.
+      const need = {
+        uncompressed: rawUncompressedSize === ZIP64_U32_SENTINEL,
+        compressed: rawCompressedSize === ZIP64_U32_SENTINEL,
+        offset: rawOffset === ZIP64_U32_SENTINEL,
+        disk: rawDisk === ZIP64_U16_SENTINEL,
+      };
+      const z64 =
+        need.uncompressed || need.compressed || need.offset || need.disk
+          ? parseZip64Extra(extraField, need)
+          : {};
+
       return {
         meta: {
           length: 46 + filenameLength + extraFieldLength + fileCommentLength,
@@ -1049,22 +1212,19 @@ export const parseOneCD = (
           lastModifiedTime: view.getUint16(i + 12, true),
           lastModifiedDate: view.getUint16(i + 14, true),
           crc32: view.getUint32(i + 16, true),
-          compressedSize: view.getUint32(i + 20, true),
-          uncompressedSize: view.getUint32(i + 24, true),
+          compressedSize: z64.compressedSize ?? rawCompressedSize,
+          uncompressedSize: z64.uncompressedSize ?? rawUncompressedSize,
           filenameLength,
           extraFieldLength,
           fileCommentLength,
-          startingDiskNumber: view.getUint16(i + 34, true),
+          startingDiskNumber: z64.diskStart ?? rawDisk,
           internalFileAttributes: view.getUint16(i + 36, true),
           externalFileAttributes: view.getUint32(i + 38, true),
-          localFileHeaderRelativeOffset: view.getUint32(i + 42, true),
+          localFileHeaderRelativeOffset: z64.localHeaderOffset ?? rawOffset,
           filename: decoder.decode(
             buffer.slice(i + 46, i + 46 + filenameLength),
           ),
-          extraField: buffer.slice(
-            i + 46 + filenameLength,
-            i + 46 + filenameLength + extraFieldLength,
-          ),
+          extraField,
           fileComment: decoder.decode(
             buffer.slice(
               i + 46 + filenameLength + extraFieldLength,
@@ -1137,7 +1297,23 @@ export const parseOneLocalFile = (
       const hasDataDescriptor = Boolean((bitflags >> 3) & 1);
 
       const headerEndOffset = i + 30 + filenameLength + extraFieldLength;
-      const regularCompressedSize = view.getUint32(i + 18, true);
+      const rawCompressedSize = view.getUint32(i + 18, true);
+      const rawUncompressedSize = view.getUint32(i + 22, true);
+
+      // ZIP64: resolve sentinel sizes from the local header's extra field.
+      const localExtra = buffer.slice(i + 30 + filenameLength, headerEndOffset);
+      const z64Need = {
+        uncompressed: rawUncompressedSize === ZIP64_U32_SENTINEL,
+        compressed: rawCompressedSize === ZIP64_U32_SENTINEL,
+        offset: false,
+        disk: false,
+      };
+      const z64 =
+        z64Need.uncompressed || z64Need.compressed
+          ? parseZip64Extra(localExtra, z64Need)
+          : {};
+      const regularCompressedSize = z64.compressedSize ?? rawCompressedSize;
+      const uncompressedSize = z64.uncompressedSize ?? rawUncompressedSize;
 
       const hasOptionalSignature =
         view.getUint32(headerEndOffset + compressedSizeOverride) ===
@@ -1197,16 +1373,13 @@ export const parseOneLocalFile = (
           lastModifiedDate: view.getUint16(i + 12, true),
           crc32: view.getUint32(i + 14, true),
           compressedSize: regularCompressedSize,
-          uncompressedSize: view.getUint32(i + 22, true),
+          uncompressedSize,
           filenameLength,
           extraFieldLength,
           filename: decoder.decode(
             buffer.slice(i + 30, i + 30 + filenameLength),
           ),
-          extraField: buffer.slice(
-            i + 30 + filenameLength,
-            i + 30 + filenameLength + extraFieldLength,
-          ),
+          extraField: localExtra,
         },
       };
     }

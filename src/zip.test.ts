@@ -21,6 +21,8 @@ import {
   parseOneCD,
   parseAllCDs,
   parseOneLocalFile,
+  parseZip64EOCD,
+  parseZip64EOCDLocator,
   RemoteZipError,
   EndOfCentralDirectory,
 } from ".";
@@ -542,6 +544,138 @@ async function collect(
   }
   return out;
 }
+
+/**
+ * Build a minimal, valid ZIP64 archive: one stored entry "a.txt" = "hi" whose
+ * 32-bit size/offset fields are 0xffffffff sentinels, with the real values in
+ * ZIP64 extra fields, a ZIP64 EOCD record + locator, and a regular EOCD.
+ */
+function buildZip64(): Uint8Array {
+  const enc = new TextEncoder();
+  const name = enc.encode("a.txt");
+  const data = enc.encode("hi");
+  const U32 = 0xffffffff;
+
+  // Local file header: sentinel sizes + a 20-byte ZIP64 extra (uncompressed,
+  // compressed) + the stored data.
+  const lfh = new Uint8Array(30 + name.length + 20 + data.length);
+  const lv = new DataView(lfh.buffer);
+  lv.setUint32(0, 0x504b0304); // signature
+  lv.setUint16(4, 45, true); // version to extract (4.5 = zip64)
+  lv.setUint32(18, U32, true); // compressed size sentinel
+  lv.setUint32(22, U32, true); // uncompressed size sentinel
+  lv.setUint16(26, name.length, true); // filename length
+  lv.setUint16(28, 20, true); // extra field length
+  lfh.set(name, 30);
+  let p = 30 + name.length;
+  lv.setUint16(p, 0x0001, true); // ZIP64 extra header id
+  lv.setUint16(p + 2, 16, true); // extra data size
+  lv.setBigUint64(p + 4, BigInt(data.length), true); // uncompressed size
+  lv.setBigUint64(p + 12, BigInt(data.length), true); // compressed size
+  lfh.set(data, 30 + name.length + 20);
+
+  // Central directory: sentinel sizes + offset, with a 24-byte ZIP64 extra.
+  const cd = new Uint8Array(46 + name.length + 28);
+  const cv = new DataView(cd.buffer);
+  cv.setUint32(0, 0x504b0102); // signature
+  cv.setUint16(6, 45, true); // version to extract
+  cv.setUint32(20, U32, true); // compressed size sentinel
+  cv.setUint32(24, U32, true); // uncompressed size sentinel
+  cv.setUint16(28, name.length, true); // filename length
+  cv.setUint16(30, 28, true); // extra field length
+  cv.setUint32(42, U32, true); // local header offset sentinel
+  cd.set(name, 46);
+  p = 46 + name.length;
+  cv.setUint16(p, 0x0001, true); // ZIP64 extra header id
+  cv.setUint16(p + 2, 24, true); // extra data size
+  cv.setBigUint64(p + 4, BigInt(data.length), true); // uncompressed size
+  cv.setBigUint64(p + 12, BigInt(data.length), true); // compressed size
+  cv.setBigUint64(p + 20, 0n, true); // local header offset
+
+  const cdOffset = lfh.length;
+  const cdSize = cd.length;
+
+  // ZIP64 EOCD record (56-byte fixed part) with the real CD offset/size/count.
+  const z64 = new Uint8Array(56);
+  const zv = new DataView(z64.buffer);
+  zv.setUint32(0, 0x504b0606); // signature
+  zv.setBigUint64(4, 44n, true); // size of record minus 12
+  zv.setUint16(12, 45, true); // version made by
+  zv.setUint16(14, 45, true); // version to extract
+  zv.setBigUint64(24, 1n, true); // cd records on this disk
+  zv.setBigUint64(32, 1n, true); // total cd records
+  zv.setBigUint64(40, BigInt(cdSize), true); // cd size
+  zv.setBigUint64(48, BigInt(cdOffset), true); // cd offset
+  const z64Offset = cdOffset + cdSize;
+
+  // ZIP64 EOCD locator (20 bytes), pointing at the ZIP64 EOCD record.
+  const loc = new Uint8Array(20);
+  const locv = new DataView(loc.buffer);
+  locv.setUint32(0, 0x504b0607); // signature
+  locv.setBigUint64(8, BigInt(z64Offset), true); // ZIP64 EOCD offset
+  locv.setUint32(16, 1, true); // total disks
+
+  // Regular EOCD with CD size/offset sentinels (triggers ZIP64 detection).
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x504b0506); // signature
+  ev.setUint16(8, 1, true); // cd records on this disk
+  ev.setUint16(10, 1, true); // total cd records
+  ev.setUint32(12, U32, true); // cd size sentinel
+  ev.setUint32(16, U32, true); // cd offset sentinel
+
+  const parts = [lfh, cd, z64, loc, eocd];
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let o = 0;
+  for (const part of parts) {
+    out.set(part, o);
+    o += part.length;
+  }
+  return out;
+}
+
+describe("ZIP64 parsers", () => {
+  it("return null when the signature is absent", () => {
+    expect(parseZip64EOCDLocator(new ArrayBuffer(20))).toBeNull();
+    expect(parseZip64EOCD(new ArrayBuffer(56))).toBeNull();
+  });
+
+  it("parseZip64EOCD reads 64-bit central directory offset/size", () => {
+    const buf = new ArrayBuffer(56);
+    const dv = new DataView(buf);
+    dv.setUint32(0, 0x504b0606); // signature
+    dv.setBigUint64(32, 3n, true); // total cd records
+    dv.setBigUint64(40, 79n, true); // cd size
+    dv.setBigUint64(48, 0x1_0000_0000n, true); // cd offset > 4 GiB
+    const parsed = parseZip64EOCD(buf);
+    expect(parsed?.centralDirectoryRecordCount).toBe(3);
+    expect(parsed?.centralDirectoryByteSize).toBe(79);
+    expect(parsed?.centralDirectoryByteOffset).toBe(0x1_0000_0000);
+  });
+});
+
+describe("ZIP64", () => {
+  it("lists and fetches an entry from a ZIP64 archive", async () => {
+    const zip = buildZip64();
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      expect(remoteZip.files()).toEqual([
+        expect.objectContaining({ filename: "a.txt", size: 2 }),
+      ]);
+      const cd = remoteZip.centralDirectoryRecords[0].data;
+      expect(cd.compressedSize).toBe(2);
+      expect(cd.localFileHeaderRelativeOffset).toBe(0);
+      expect(new TextDecoder().decode(await remoteZip.fetch("a.txt"))).toBe(
+        "hi",
+      );
+    } finally {
+      server.close();
+    }
+  });
+});
 
 describe("fetchStream", () => {
   it("streams a stored entry", async () => {
