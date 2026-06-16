@@ -54,6 +54,7 @@
     "build": "rm -rf lib/* && npm run ts-types && node ./esbuild.mjs",
     "d": "WATCH=1 npm run build",
     "doc:gen": "typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
+    "doc:site": "npm run build && npm run doc:gen && node ./scripts/build-site.mjs",
     "lint:eslint:fix": "npm run lint:eslint -- --fix",
     "lint:eslint": "eslint .",
     "lint:fix": "npm run lint:prettier:fix && npm run lint:eslint:fix",

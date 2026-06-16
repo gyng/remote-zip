@@ -29,14 +29,14 @@ jobs:
 
       - run: npm ci
 
-      - name: Generate API docs
-        run: npm run doc:gen
+      - name: Build the site (landing page + demo + API docs under /api)
+        run: npm run doc:site
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/api
+          path: docs
 
   deploy:
     needs: build
