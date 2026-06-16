@@ -1,6 +1,6 @@
 {
   "name": "@gyng/remote-zip",
-  "version": "0.2.5",
+  "version": "1.0.0",
   "description": "Fetch file listings and individual files from a remote ZIP archive over HTTP Range requests, without downloading the whole archive.",
   "type": "commonjs",
   "main": "lib/cjs/index.js",
