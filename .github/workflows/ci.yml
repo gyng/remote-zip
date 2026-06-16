@@ -36,3 +36,15 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test:coverage
+
+  # Stable required-check target: one "Test" status regardless of the matrix,
+  # so branch protection can require a single context.
+  test-result:
+    name: Test
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all matrix legs passed
+        run: |
+          [ "${{ needs.test.result }}" = "success" ] || exit 1
