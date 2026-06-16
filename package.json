@@ -1,57 +1,91 @@
 {
   "name": "@gyng/remote-zip",
-  "version": "0.2.5",
+  "version": "1.0.0",
+  "description": "Fetch file listings and individual files from a remote ZIP archive over HTTP Range requests, without downloading the whole archive.",
+  "type": "commonjs",
   "main": "lib/cjs/index.js",
-  "module": "lib/esm/index.js",
+  "module": "lib/esm/index.mjs",
   "types": "lib/types/index.d.ts",
-  "author": "AIcadium, Ng Guoyou <gyng@users.noreply.github.com>",
-  "license": "MIT",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./lib/types/index.d.mts",
+        "default": "./lib/esm/index.mjs"
+      },
+      "require": {
+        "types": "./lib/types/index.d.ts",
+        "default": "./lib/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "author": "Ng Guoyou <gyng@users.noreply.github.com>",
+  "license": "(MIT OR Apache-2.0)",
+  "keywords": [
+    "zip",
+    "remote",
+    "http",
+    "range",
+    "fetch",
+    "stream",
+    "central-directory",
+    "browser"
+  ],
+  "homepage": "https://github.com/gyng/remote-zip#readme",
+  "bugs": {
+    "url": "https://github.com/gyng/remote-zip/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.11.0",
   "files": [
-    "LICENSE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "README.md",
     "package.json",
     "lib/**"
   ],
   "repository": {
     "type": "git",
-    "url": "git://github.com/gyng/remote-zip.git"
+    "url": "git+https://github.com/gyng/remote-zip.git"
   },
   "scripts": {
-    "build": "rm -rf lib/* && yarn ts-types && node ./esbuild.mjs",
-    "d:server": "http-server fixtures",
-    "d": "WATCH=1 yarn build",
-    "doc:gen": "yarn typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
-    "lint:eslint:fix": "yarn lint:eslint --fix",
-    "lint:eslint": "eslint . --ext .js --ext .jsx --ext .ts --ext .tsx",
-    "lint:fix": "yarn lint:prettier:fix && yarn lint:eslint:fix",
+    "build": "rm -rf lib/* && npm run ts-types && node ./esbuild.mjs",
+    "d": "WATCH=1 npm run build",
+    "doc:gen": "typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
+    "doc:site": "npm run build && npm run doc:gen && node ./scripts/build-site.mjs",
+    "lint:eslint:fix": "npm run lint:eslint -- --fix",
+    "lint:eslint": "eslint .",
+    "lint:fix": "npm run lint:prettier:fix && npm run lint:eslint:fix",
     "lint:prettier:fix": "prettier --write .",
     "lint:prettier": "prettier --check .",
-    "lint": "yarn lint:prettier && yarn lint:eslint",
-    "t:watch": "yarn test --watch",
-    "t": "yarn test",
-    "test:coverage": "yarn test --coverage",
-    "test": "jest",
-    "ts-types": " tsc --emitDeclarationOnly --outDir lib/types"
+    "lint": "npm run lint:prettier && npm run lint:eslint",
+    "t:watch": "vitest",
+    "t": "npm test",
+    "test:coverage": "vitest run --coverage",
+    "test": "vitest run",
+    "ts-types": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
-    "@types/http-server": "^0.12.1",
-    "@types/jest": "^29.5.2",
-    "@types/node": "^20.3.1",
-    "@types/pako": "^2.0.0",
-    "@typescript-eslint/eslint-plugin": "^5.60.0",
-    "@typescript-eslint/parser": "^5.60.0",
-    "esbuild": "^0.18.7",
-    "esbuild-jest": "^0.5.0",
-    "eslint": "^8.43.0",
-    "eslint-config-prettier": "^8.8.0",
-    "eslint-plugin-jest": "^27.2.2",
-    "http-server": "^14.1.1",
-    "jest": "^29.5.0",
-    "prettier": "^2.8.8",
-    "typedoc": "^0.24.8",
-    "typescript": "^5.1.3"
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^22.19.20",
+    "@types/pako": "^2.0.4",
+    "@vitest/coverage-v8": "^4.1.0",
+    "esbuild": "^0.28.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.3",
+    "typedoc": "^0.28.19",
+    "typescript": "~5.9",
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.0"
   },
   "dependencies": {
-    "cross-fetch": "^3.1.6",
     "pako": "^2.1.0"
   }
 }

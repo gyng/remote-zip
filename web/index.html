@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>remote-zip — fetch files from a remote ZIP over HTTP Range</title>
+    <meta
+      name="description"
+      content="List and fetch individual files from a remote ZIP archive over HTTP Range requests, without downloading the whole archive."
+    />
+    <style>
+      :root {
+        --fg: #1b1f24;
+        --muted: #5b6570;
+        --bg: #ffffff;
+        --soft: #f5f7f9;
+        --border: #e3e8ec;
+        --accent: #2b6cb0;
+        --mono:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e6edf3;
+          --muted: #9aa7b2;
+          --bg: #0d1117;
+          --soft: #161b22;
+          --border: #2a313a;
+          --accent: #6cb0ff;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          16px/1.6 system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          sans-serif;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 2.5rem 1.25rem 4rem;
+      }
+      h1 {
+        font-size: 2.4rem;
+        margin: 0;
+        letter-spacing: -0.02em;
+      }
+      .tagline {
+        color: var(--muted);
+        font-size: 1.15rem;
+        margin: 0.4rem 0 1.25rem;
+      }
+      .links a {
+        color: var(--accent);
+        text-decoration: none;
+        margin-right: 1rem;
+      }
+      .links a:hover {
+        text-decoration: underline;
+      }
+      h2 {
+        margin-top: 2.5rem;
+        font-size: 1.3rem;
+      }
+      ul {
+        padding-left: 1.2rem;
+      }
+      pre {
+        background: var(--soft);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 0.86rem;
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 0.9em;
+      }
+      .demo {
+        background: var(--soft);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.25rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      input[type="text"] {
+        flex: 1 1 18rem;
+        min-width: 0;
+        padding: 0.55rem 0.7rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--mono);
+        font-size: 0.85rem;
+      }
+      button {
+        padding: 0.55rem 1rem;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+      }
+      button:hover {
+        filter: brightness(1.05);
+      }
+      button.ghost {
+        background: transparent;
+        color: var(--accent);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 1rem;
+        font-size: 0.9rem;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.4rem 0.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+      td.name {
+        font-family: var(--mono);
+        font-size: 0.85rem;
+        word-break: break-all;
+      }
+      .out {
+        margin-top: 1rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+      footer {
+        margin-top: 3rem;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>remote-zip</h1>
+      <p class="tagline">
+        List and fetch individual files from a remote ZIP archive over HTTP
+        Range requests — without downloading the whole archive.
+      </p>
+      <p class="links">
+        <a href="./api/">API docs</a>
+        <a href="https://www.npmjs.com/package/@gyng/remote-zip">npm</a>
+        <a href="https://github.com/gyng/remote-zip">GitHub</a>
+      </p>
+
+      <h2>Features</h2>
+      <ul>
+        <li>Fetch individual files and listings (buffered or streaming)</li>
+        <li>ZIP64 (&gt;4&nbsp;GiB / &gt;65,535 entries)</li>
+        <li>Encrypted entries: ZipCrypto and WinZip AES</li>
+        <li>CP437 / UTF-8 filenames; optional CRC-32 verification</li>
+        <li>Runs in the browser and Node (&ge;22); one runtime dependency</li>
+      </ul>
+
+      <h2>Install</h2>
+      <pre><code>npm install @gyng/remote-zip</code></pre>
+
+      <h2>Usage</h2>
+      <pre><code>import { RemoteZipPointer } from "@gyng/remote-zip";
+
+const url = new URL("https://example.com/archive.zip");
+const zip = await new RemoteZipPointer({ url }).populate();
+
+zip.files(); // -&gt; [{ filename, size, modified, attributes }, ...]
+const bytes = await zip.fetch("path/in/zip.txt"); // -&gt; Uint8Array</code></pre>
+
+      <h2>Try it</h2>
+      <div class="demo">
+        <div class="row">
+          <input
+            id="url"
+            type="text"
+            value="./sample.zip"
+            aria-label="ZIP URL"
+          />
+          <button id="list">List files</button>
+        </div>
+        <p class="out" id="status">
+          Loads a small sample ZIP served from this page. Try your own URL — the
+          server must allow CORS and HTTP Range requests.
+        </p>
+        <div id="result"></div>
+        <div class="out" id="preview"></div>
+      </div>
+
+      <footer>
+        Dual-licensed MIT or Apache-2.0. Built with
+        <a href="https://github.com/gyng/remote-zip">remote-zip</a>.
+      </footer>
+    </main>
+
+    <script type="module">
+      import { RemoteZipPointer } from "./remote-zip.mjs";
+
+      const $ = (id) => document.getElementById(id);
+      const status = $("status");
+      const result = $("result");
+      const preview = $("preview");
+
+      const fmtSize = (n) =>
+        n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`;
+
+      async function listFiles() {
+        result.innerHTML = "";
+        preview.textContent = "";
+        status.textContent = "Loading…";
+        try {
+          const url = new URL($("url").value, location.href);
+          const zip = await new RemoteZipPointer({ url }).populate();
+          const files = zip.files();
+          status.textContent = `${files.length} entr${files.length === 1 ? "y" : "ies"} · archive ${fmtSize(zip.contentLength)}`;
+
+          const rows = files
+            .map(
+              (f) => `<tr>
+                <td class="name">${f.filename.replace(/</g, "&lt;")}</td>
+                <td>${fmtSize(f.size)}</td>
+                <td>${f.modified.replace("T", " ")}</td>
+                <td><button class="ghost" data-name="${encodeURIComponent(f.filename)}" ${f.size === 0 ? "disabled" : ""}>fetch</button></td>
+              </tr>`,
+            )
+            .join("");
+          result.innerHTML = `<table><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+
+          result.querySelectorAll("button[data-name]").forEach((btn) => {
+            btn.addEventListener("click", () =>
+              fetchOne(zip, decodeURIComponent(btn.dataset.name)),
+            );
+          });
+        } catch (err) {
+          status.textContent = `Error: ${err?.message ?? err}`;
+        }
+      }
+
+      async function fetchOne(zip, name) {
+        preview.textContent = `Fetching ${name}…`;
+        try {
+          const bytes = await zip.fetch(name);
+          const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+          const printable =
+            // crude: mostly-printable -> show as text, else hex
+            [...text].filter(
+              (c) => c.charCodeAt(0) < 32 && !"\n\r\t".includes(c),
+            ).length <
+            bytes.length * 0.05;
+          if (printable) {
+            preview.textContent = `${name} (${bytes.length} bytes):\n\n${text.slice(0, 2000)}`;
+          } else {
+            const hex = [...bytes.slice(0, 256)]
+              .map((b) => b.toString(16).padStart(2, "0"))
+              .join(" ");
+            preview.textContent = `${name} (${bytes.length} bytes, binary):\n\n${hex}${bytes.length > 256 ? " …" : ""}`;
+          }
+        } catch (err) {
+          preview.textContent = `Error: ${err?.message ?? err}`;
+        }
+      }
+
+      $("list").addEventListener("click", listFiles);
+      $("url").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") listFiles();
+      });
+      listFiles();
+    </script>
+  </body>
+</html>

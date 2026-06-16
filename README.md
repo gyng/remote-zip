@@ -8,8 +8,11 @@ Fetch file listings and individual files from a remote ZIP file.
 
 Without downloading the entire ZIP:
 
-- Fetch individual files in a remote ZIP
+- Fetch individual files in a remote ZIP (buffered or streaming)
 - Fetch file listings
+- ZIP64 archives (>4 GiB / >65,535 entries)
+- Encrypted entries: traditional ZipCrypto and WinZip AES (AE-1/AE-2)
+- CP437 and UTF-8 filenames; optional CRC-32 verification
 
 The gist of what the library does is:
 
@@ -20,26 +23,43 @@ The gist of what the library does is:
 
 ## Limitations
 
-- No ZIP64 support
-- No encrypted ZIP support
-- No stream support via `ReadableStream` due to testing/dev difficulties
-- Long comments in a ZIP file might cause `populate()` to fail
+- PKWare _strong_ encryption (general-purpose bit 6) is detected and rejected
+- Multi-disk / split archives are not supported
+
+> Decrypting WinZip AES entries uses the Web Crypto API (`crypto.subtle`), which
+> in browsers is only available in a secure context (HTTPS or `localhost`).
+> Traditional ZipCrypto works everywhere but is cryptographically weak.
 
 ## Install
 
 ```bash
-yarn add @gyng/remote-zip
+npm install @gyng/remote-zip
 ```
 
 ```bash
-npm install --save @gyng/remote-zip
+yarn add @gyng/remote-zip
 ```
 
 ## Usage
 
 See the [generated API documentation](https://gyng.github.io/remote-zip/).
 
-If using in the browser, the server will need to whitelist CORS for `GET`, `HEAD`, and the `Range` header.
+### Server requirements (CORS & Range)
+
+The remote server must support **HTTP Range** requests (respond `206 Partial
+Content`). When used cross-origin from a browser, it must also send the right
+CORS headers. The browser issues the CORS preflight (`OPTIONS`) automatically —
+there is nothing to configure on the client — but the server needs to allow it:
+
+- `Access-Control-Allow-Origin: <your origin>`
+- `Access-Control-Allow-Methods: GET, HEAD` (add `POST` if you set a custom `method`)
+- `Access-Control-Allow-Headers: Range` (plus `Authorization` / any custom headers you pass)
+- `Access-Control-Expose-Headers: Content-Length, Content-Range` — **required**, or
+  the browser hides those response headers and `populate()` cannot read the archive size
+
+`Range` is not a CORS-safelisted request header, so any cross-origin request
+triggers a preflight. Static hosts like S3, GitHub Pages, and nginx support Range
+out of the box; you only need to configure the CORS headers above.
 
 ### Basic
 
@@ -47,23 +67,48 @@ If using in the browser, the server will need to whitelist CORS for `GET`, `HEAD
 const url = new URL("http://www.example.com/test.zip");
 const remoteZip = await new RemoteZipPointer({ url }).populate();
 const fileListing = remoteZip.files(); // RemoteZipFile[]
-const uncompressedBytes = await remoteZip.fetch("test.txt"); // ArrayBuffer
+const uncompressedBytes = await remoteZip.fetch("test.txt"); // Uint8Array
+```
+
+### Streaming
+
+For large entries, `fetchStream` returns a `ReadableStream<Uint8Array>` of the
+uncompressed bytes so you can process them incrementally without buffering the
+whole file. `maxUncompressedSize`, if set, is enforced mid-stream.
+
+```ts
+const stream = await remoteZip.fetchStream("big.bin");
+for await (const chunk of stream) {
+  // handle each chunk
+}
 ```
 
 ### With more features
 
 ```ts
-const method = "POST";
-const additonalHeaders = new Headers();
-additonalHeaders.append("X-Example", "foobar");
+const additionalHeaders = new Headers();
+additionalHeaders.append("X-Example", "foobar");
 const url = new URL("http://www.example.com/test.zip");
+
 const remoteZip = await new RemoteZipPointer({
   url,
   additionalHeaders,
-  method,
+  method: "POST",
   credentials: "include",
+  // New request options (all optional), applied to every request:
+  redirect: "error", // avoid leaking auth headers cross-origin on a 30x
+  timeoutMs: 10_000, // per-request timeout
+  signal: AbortSignal.timeout(30_000), // or your own AbortController signal
+  requestInit: { cache: "no-store" }, // escape hatch merged into every fetch
 }).populate();
-const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders);
+
+// Guard untrusted archives against decompression bombs, and pass a per-call
+// signal/timeout if you like:
+const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders, {
+  maxUncompressedSize: 50 * 1024 * 1024,
+  verifyCrc: true, // check the decompressed bytes against the entry's CRC-32
+  password: "hunter2", // for ZipCrypto / WinZip AES encrypted entries
+});
 ```
 
 ## Dev
@@ -72,15 +117,16 @@ const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders);
 <summary>Dev instructions</summary>
 See `scripts` in `package.json` for more scripts.
 
-- `yarn d` watch and build
-- `yarn t:watch` watch and test
-- `yarn lint`
-- `yarn build`
+Requires Node >= 22.
 
-Run tests and checks with Docker
-
-```
-docker-compose -f docker-compose.test.yml up --build
+```bash
+npm ci            # install (reproducible, honours .npmrc cooldown)
+npm run d         # watch and build
+npm run t:watch   # watch and test
+npm run lint      # prettier + eslint
+npm run typecheck # tsc --noEmit (also checks tests)
+npm run build     # type declarations + esm/cjs bundles
+npm test          # run the test suite once
 ```
 
 ### Publish
@@ -90,7 +136,7 @@ docker-compose -f docker-compose.test.yml up --build
 1. Get an automation token from npm under settings
 
    ```
-   https://www.npmjs.com/settings/aicadium/tokens/
+   https://www.npmjs.com/settings/$YOUR_USERNAME/tokens/
    ```
 
 2. Add the token to your repository secrets.
@@ -114,3 +160,16 @@ docker-compose -f docker-compose.test.yml up --build
 
    Don't forget to bump your version number in `package.json` before this.
    </details>
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

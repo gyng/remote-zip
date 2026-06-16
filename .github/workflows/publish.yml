@@ -3,39 +3,59 @@
 name: Publish
 on:
   release:
-    types: [created]
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance + attestation signing
+  packages: write # GitHub Packages
+  attestations: write # build provenance attestation
+
 jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - name: Clone repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Set up Node + npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - run: npm ci
 
       - name: Build
-        run: docker-compose -f docker-compose.build.yml up --build --exit-code-from app
+        run: npm run build
 
-      - name: Set up .npmrc for NPM
-        uses: actions/setup-node@v3
+      - name: Verify build artifacts exist before publishing
+        run: |
+          test -f lib/cjs/index.js
+          test -f lib/esm/index.mjs
+          test -f lib/types/index.d.ts
+
+      - name: Attest build provenance for the shipped bundles
+        uses: actions/attest-build-provenance@v2
         with:
-          registry-url: "https://registry.npmjs.org"
+          subject-path: "lib/**/*"
 
-      - name: Publish to NPM
-        run: npm publish --access public
+      - name: Publish to npm (with provenance)
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Set up .npmrc for GitHub Packages
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
+          node-version: lts/*
           registry-url: "https://npm.pkg.github.com"
           # Defaults to the user or organization that owns the workflow file
           scope: "@gyng"
 
       - name: Publish to GitHub Packages
-        run: npm publish
+        run: npm publish --registry=https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
