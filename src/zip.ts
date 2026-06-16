@@ -387,6 +387,110 @@ export class RemoteZip {
       timeoutMs?: number;
     },
   ): Promise<Uint8Array> {
+    const { file, response } = await this.fetchEntryResponse(
+      path,
+      additionalHeaders,
+      options,
+    );
+    const localFile = parseOneLocalFile(
+      await response.arrayBuffer(),
+      file.data.compressedSize,
+    );
+    if (!localFile) {
+      throw new RemoteZipError(
+        "cannot parse local file header in remote ZIP",
+        "LOCAL_HEADER_PARSE_FAILED",
+      );
+    }
+
+    const compressed = new Uint8Array(localFile.meta.compressedData);
+    const max = options?.maxUncompressedSize;
+
+    // 0 = stored (uncompressed), 8 = deflate. Treat anything else as raw DEFLATE.
+    if (localFile.data.compressionMethod === 0) {
+      if (max !== undefined && compressed.byteLength > max) {
+        throw new RemoteZipError(
+          `Uncompressed size exceeds maxUncompressedSize (${max} bytes)`,
+          "DECOMPRESSION_LIMIT_EXCEEDED",
+        );
+      }
+      return compressed;
+    }
+
+    return inflateRawCapped(compressed, max);
+  }
+
+  /**
+   * Like {@link fetch}, but returns a `ReadableStream` of the uncompressed bytes
+   * so large entries can be processed incrementally without buffering the whole
+   * file. `maxUncompressedSize` is enforced mid-stream (the stream errors with a
+   * {@link RemoteZipError} once exceeded).
+   *
+   * ```ts
+   * const stream = await remoteZip.fetchStream("big.bin");
+   * for await (const chunk of stream) {
+   *   // process each chunk
+   * }
+   * ```
+   */
+  public async fetchStream(
+    path: string,
+    additionalHeaders?: Headers,
+    options?: {
+      maxUncompressedSize?: number;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+    },
+  ): Promise<ReadableStream<Uint8Array>> {
+    const { file, response } = await this.fetchEntryResponse(
+      path,
+      additionalHeaders,
+      options,
+    );
+    if (!response.body) {
+      throw new RemoteZipError(
+        "Remote ZIP response has no body to stream",
+        "LOCAL_HEADER_PARSE_FAILED",
+      );
+    }
+
+    const reader = response.body.getReader();
+    const entries = streamLocalFile(
+      reader,
+      file.data.compressedSize,
+      file.data.compressionMethod,
+      options?.maxUncompressedSize,
+    );
+
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await entries.next();
+          if (done) {
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason);
+      },
+    });
+  }
+
+  /**
+   * Find an entry, reject encrypted ones, and issue the Range request that covers
+   * its local file header + compressed data. Shared by {@link fetch} and
+   * {@link fetchStream}.
+   */
+  private async fetchEntryResponse(
+    path: string,
+    additionalHeaders?: Headers,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<{ file: CentralDirectoryRecord; response: Response }> {
     const file = this.centralDirectoryRecords.find(
       (r) => r.data.filename === path,
     );
@@ -430,32 +534,7 @@ export class RemoteZip {
         timeoutMs: options?.timeoutMs,
       }),
     );
-    const localFile = parseOneLocalFile(
-      await response.arrayBuffer(),
-      file.data.compressedSize,
-    );
-    if (!localFile) {
-      throw new RemoteZipError(
-        "cannot parse local file header in remote ZIP",
-        "LOCAL_HEADER_PARSE_FAILED",
-      );
-    }
-
-    const compressed = new Uint8Array(localFile.meta.compressedData);
-    const max = options?.maxUncompressedSize;
-
-    // 0 = stored (uncompressed), 8 = deflate. Treat anything else as raw DEFLATE.
-    if (localFile.data.compressionMethod === 0) {
-      if (max !== undefined && compressed.byteLength > max) {
-        throw new RemoteZipError(
-          `Uncompressed size exceeds maxUncompressedSize (${max} bytes)`,
-          "DECOMPRESSION_LIMIT_EXCEEDED",
-        );
-      }
-      return compressed;
-    }
-
-    return inflateRawCapped(compressed, max);
+    return { file, response };
   }
 }
 
@@ -511,6 +590,111 @@ const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
   }
   return out;
 };
+
+/**
+ * Stream the uncompressed bytes of one entry from a Range response body: parse
+ * the local file header incrementally, then either pass through (stored) or
+ * raw-inflate (deflate) the `compressedSize` bytes that follow, enforcing
+ * `maxBytes` mid-stream. Yields uncompressed chunks as they become available.
+ */
+async function* streamLocalFile(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  compressedSize: number,
+  compressionMethod: number,
+  maxBytes?: number,
+): AsyncGenerator<Uint8Array> {
+  let buf = new Uint8Array(0);
+  const append = (chunk: Uint8Array) => {
+    const next = new Uint8Array(buf.length + chunk.length);
+    next.set(buf);
+    next.set(chunk, buf.length);
+    buf = next;
+  };
+  const readMore = async (): Promise<boolean> => {
+    const { done, value } = await reader.read();
+    if (done || !value) return false;
+    append(value);
+    return true;
+  };
+
+  // 1. Read and parse the local file header to locate the compressed data.
+  while (buf.length < 30) {
+    if (!(await readMore())) {
+      throw new RemoteZipError(
+        "Truncated local file header in remote ZIP",
+        "LOCAL_HEADER_PARSE_FAILED",
+      );
+    }
+  }
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  if (dv.getUint32(0) !== SIG_LOCAL_FILE_HEADER) {
+    throw new RemoteZipError(
+      "cannot parse local file header in remote ZIP",
+      "LOCAL_HEADER_PARSE_FAILED",
+    );
+  }
+  const headerLen = 30 + dv.getUint16(26, true) + dv.getUint16(28, true);
+  while (buf.length < headerLen) {
+    if (!(await readMore())) {
+      throw new RemoteZipError(
+        "Truncated local file header in remote ZIP",
+        "LOCAL_HEADER_PARSE_FAILED",
+      );
+    }
+  }
+
+  // 2. Output pipeline: passthrough for stored, streaming raw inflate otherwise,
+  //    with a mid-stream size cap (the decompression-bomb guard).
+  let total = 0;
+  const queue: Uint8Array[] = [];
+  const emit = (chunk: Uint8Array) => {
+    if (chunk.length === 0) return;
+    total += chunk.length;
+    if (maxBytes !== undefined && total > maxBytes) {
+      throw new RemoteZipError(
+        `Decompressed size exceeds maxUncompressedSize (${maxBytes} bytes)`,
+        "DECOMPRESSION_LIMIT_EXCEEDED",
+      );
+    }
+    queue.push(chunk);
+  };
+  const inflator =
+    compressionMethod === 0 ? undefined : new Inflate({ raw: true });
+  if (inflator) {
+    inflator.onData = (c) =>
+      emit(c instanceof Uint8Array ? c : new Uint8Array(c));
+  }
+
+  let remaining = compressedSize;
+  const feed = (chunk: Uint8Array) => {
+    if (remaining <= 0 || chunk.length === 0) return;
+    const piece =
+      chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+    remaining -= piece.length;
+    if (inflator) {
+      inflator.push(piece, remaining === 0);
+      if (inflator.err) {
+        throw new RemoteZipError(
+          `Failed to inflate remote ZIP entry: ${inflator.msg}`,
+          "UNKNOWN",
+        );
+      }
+    } else {
+      emit(piece);
+    }
+  };
+
+  // 3. Stream the compressed data: leftover header-window bytes first, then the
+  //    rest straight from the reader.
+  feed(buf.subarray(headerLen));
+  yield* queue.splice(0);
+  while (remaining > 0) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    feed(value);
+    yield* queue.splice(0);
+  }
+}
 
 /**
  * Network options shared by every request a {@link RemoteZip} / {@link RemoteZipPointer}

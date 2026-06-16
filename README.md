@@ -22,7 +22,6 @@ The gist of what the library does is:
 
 - No ZIP64 support (ZIP64 archives are detected and rejected with a typed error)
 - No encrypted ZIP support (encrypted entries are detected and rejected)
-- No stream support via `ReadableStream` due to testing/dev difficulties
 
 ## Install
 
@@ -47,6 +46,19 @@ const url = new URL("http://www.example.com/test.zip");
 const remoteZip = await new RemoteZipPointer({ url }).populate();
 const fileListing = remoteZip.files(); // RemoteZipFile[]
 const uncompressedBytes = await remoteZip.fetch("test.txt"); // Uint8Array
+```
+
+### Streaming
+
+For large entries, `fetchStream` returns a `ReadableStream<Uint8Array>` of the
+uncompressed bytes so you can process them incrementally without buffering the
+whole file. `maxUncompressedSize`, if set, is enforced mid-stream.
+
+```ts
+const stream = await remoteZip.fetchStream("big.bin");
+for await (const chunk of stream) {
+  // handle each chunk
+}
 ```
 
 ### With more features

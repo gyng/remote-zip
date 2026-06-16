@@ -13,6 +13,7 @@ import {
   beforeEach,
   vi,
 } from "vitest";
+import { deflateRaw } from "pako";
 import {
   parseZipDatetime,
   isZip64,
@@ -179,6 +180,14 @@ describe("RemoteZip integration tests", () => {
         name: "RemoteZipError",
         code: "DECOMPRESSION_LIMIT_EXCEEDED",
       });
+    });
+
+    it("streams a file via fetchStream", async () => {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const stream = await remoteZip.fetchStream("test.txt");
+      expect(new TextDecoder().decode(await collect(stream))).toBe(
+        "Hello, world!\n",
+      );
     });
 
     it("provides a friendly listing of files in the zip", async () => {
@@ -388,12 +397,19 @@ describe("parseAllCDs / parseOneCD", () => {
   });
 });
 
-/** Build a minimal, valid ZIP containing one stored file "a.txt" = "hi". */
-function buildMinimalZip(comment = ""): Uint8Array {
+/**
+ * Build a minimal, valid ZIP containing one entry "a.txt". Defaults to a stored
+ * "hi"; pass `content`/`deflate` to vary the payload and `comment` for the EOCD.
+ */
+function buildMinimalZip(
+  opts: { comment?: string; content?: Uint8Array; deflate?: boolean } = {},
+): Uint8Array {
   const enc = new TextEncoder();
   const name = enc.encode("a.txt");
-  const data = enc.encode("hi");
-  const commentBytes = enc.encode(comment);
+  const uncompressed = opts.content ?? enc.encode("hi");
+  const data = opts.deflate ? deflateRaw(uncompressed) : uncompressed;
+  const method = opts.deflate ? 8 : 0;
+  const commentBytes = enc.encode(opts.comment ?? "");
 
   const lfhLen = 30 + name.length + data.length;
   const cdLen = 46 + name.length;
@@ -404,9 +420,9 @@ function buildMinimalZip(comment = ""): Uint8Array {
   // Local file header @ 0
   dv.setUint32(0, 0x504b0304); // signature
   dv.setUint16(4, 20, true); // version to extract
-  dv.setUint16(8, 0, true); // compression method = store
+  dv.setUint16(8, method, true); // compression method
   dv.setUint32(18, data.length, true); // compressed size
-  dv.setUint32(22, data.length, true); // uncompressed size
+  dv.setUint32(22, uncompressed.length, true); // uncompressed size
   dv.setUint16(26, name.length, true); // filename length
   buf.set(name, 30);
   buf.set(data, 30 + name.length);
@@ -415,8 +431,9 @@ function buildMinimalZip(comment = ""): Uint8Array {
   const cdOff = lfhLen;
   dv.setUint32(cdOff, 0x504b0102); // signature
   dv.setUint16(cdOff + 6, 20, true); // version to extract
+  dv.setUint16(cdOff + 10, method, true); // compression method
   dv.setUint32(cdOff + 20, data.length, true); // compressed size
-  dv.setUint32(cdOff + 24, data.length, true); // uncompressed size
+  dv.setUint32(cdOff + 24, uncompressed.length, true); // uncompressed size
   dv.setUint16(cdOff + 28, name.length, true); // filename length
   dv.setUint32(cdOff + 42, 0, true); // local file header relative offset
   buf.set(name, cdOff + 46);
@@ -438,7 +455,7 @@ describe("long zip comments", () => {
   it("re-fetches a larger window to find the EOCD past a long comment", async () => {
     // A comment longer than the initial 128-byte EOCD window forces a re-fetch.
     const comment = "x".repeat(500);
-    const zip = buildMinimalZip(comment);
+    const zip = buildMinimalZip({ comment });
     const server = http.createServer((req, res) => sendBody(req, res, zip));
     const port = await listen(server);
     try {
@@ -498,6 +515,83 @@ describe("request options", () => {
       await expect(
         new RemoteZipPointer({ url, redirect: "error" }).populate(),
       ).rejects.toThrow();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/** Drain a ReadableStream into a single Uint8Array. */
+async function collect(
+  stream: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
+}
+
+describe("fetchStream", () => {
+  it("streams a stored entry", async () => {
+    const content = new TextEncoder().encode("a stored payload");
+    const zip = buildMinimalZip({ content });
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const out = await collect(await remoteZip.fetchStream("a.txt"));
+      expect(new TextDecoder().decode(out)).toBe("a stored payload");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("streams and inflates a deflated entry across chunks", async () => {
+    // A payload large enough that inflate emits several chunks.
+    const content = new TextEncoder().encode(
+      "the quick brown fox. ".repeat(2000),
+    );
+    const zip = buildMinimalZip({ content, deflate: true });
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const out = await collect(await remoteZip.fetchStream("a.txt"));
+      expect(out).toEqual(content);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("errors mid-stream when maxUncompressedSize is exceeded", async () => {
+    const content = new TextEncoder().encode("x".repeat(100_000));
+    const zip = buildMinimalZip({ content, deflate: true });
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const stream = await remoteZip.fetchStream("a.txt", undefined, {
+        maxUncompressedSize: 1000,
+      });
+      await expect(collect(stream)).rejects.toMatchObject({
+        name: "RemoteZipError",
+        code: "DECOMPRESSION_LIMIT_EXCEEDED",
+      });
     } finally {
       server.close();
     }
