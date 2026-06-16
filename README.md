@@ -11,6 +11,7 @@ Without downloading the entire ZIP:
 - Fetch individual files in a remote ZIP (buffered or streaming)
 - Fetch file listings
 - ZIP64 archives (>4 GiB / >65,535 entries)
+- CP437 and UTF-8 filenames; optional CRC-32 verification
 
 The gist of what the library does is:
 
@@ -85,6 +86,7 @@ const remoteZip = await new RemoteZipPointer({
 // signal/timeout if you like:
 const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders, {
   maxUncompressedSize: 50 * 1024 * 1024,
+  verifyCrc: true, // check the decompressed bytes against the entry's CRC-32
 });
 ```
 

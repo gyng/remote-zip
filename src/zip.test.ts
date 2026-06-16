@@ -24,6 +24,7 @@ import {
   parseZip64EOCD,
   parseZip64EOCDLocator,
   decodeZipString,
+  crc32,
   RemoteZipError,
   EndOfCentralDirectory,
 } from ".";
@@ -405,13 +406,19 @@ describe("parseAllCDs / parseOneCD", () => {
  * "hi"; pass `content`/`deflate` to vary the payload and `comment` for the EOCD.
  */
 function buildMinimalZip(
-  opts: { comment?: string; content?: Uint8Array; deflate?: boolean } = {},
+  opts: {
+    comment?: string;
+    content?: Uint8Array;
+    deflate?: boolean;
+    crc?: number;
+  } = {},
 ): Uint8Array {
   const enc = new TextEncoder();
   const name = enc.encode("a.txt");
   const uncompressed = opts.content ?? enc.encode("hi");
   const data = opts.deflate ? deflateRaw(uncompressed) : uncompressed;
   const method = opts.deflate ? 8 : 0;
+  const crc = opts.crc ?? crc32(uncompressed);
   const commentBytes = enc.encode(opts.comment ?? "");
 
   const lfhLen = 30 + name.length + data.length;
@@ -424,6 +431,7 @@ function buildMinimalZip(
   dv.setUint32(0, 0x504b0304); // signature
   dv.setUint16(4, 20, true); // version to extract
   dv.setUint16(8, method, true); // compression method
+  dv.setUint32(14, crc, true); // crc-32
   dv.setUint32(18, data.length, true); // compressed size
   dv.setUint32(22, uncompressed.length, true); // uncompressed size
   dv.setUint16(26, name.length, true); // filename length
@@ -435,6 +443,7 @@ function buildMinimalZip(
   dv.setUint32(cdOff, 0x504b0102); // signature
   dv.setUint16(cdOff + 6, 20, true); // version to extract
   dv.setUint16(cdOff + 10, method, true); // compression method
+  dv.setUint32(cdOff + 16, crc, true); // crc-32
   dv.setUint32(cdOff + 20, data.length, true); // compressed size
   dv.setUint32(cdOff + 24, uncompressed.length, true); // uncompressed size
   dv.setUint16(cdOff + 28, name.length, true); // filename length
@@ -731,6 +740,69 @@ describe("ZIP64", () => {
       expect(new TextDecoder().decode(await remoteZip.fetch("a.txt"))).toBe(
         "hi",
       );
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("CRC-32 verification", () => {
+  it("crc32 matches the standard check value", () => {
+    expect(crc32(new TextEncoder().encode("123456789"))).toBe(0xcbf43926);
+  });
+
+  it("fetch(verifyCrc) passes for a valid entry", async () => {
+    const content = new TextEncoder().encode("verify me ".repeat(50));
+    const zip = buildMinimalZip({ content, deflate: true });
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const out = await remoteZip.fetch("a.txt", undefined, {
+        verifyCrc: true,
+      });
+      expect(out).toEqual(content);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("fetch(verifyCrc) throws on a CRC mismatch", async () => {
+    const zip = buildMinimalZip({
+      content: new TextEncoder().encode("hello"),
+      crc: 0xdeadbeef,
+    });
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { verifyCrc: true }),
+      ).rejects.toMatchObject({ code: "CRC_MISMATCH" });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("fetchStream(verifyCrc) errors the stream on a CRC mismatch", async () => {
+    const zip = buildMinimalZip({
+      content: new TextEncoder().encode("x".repeat(2000)),
+      deflate: true,
+      crc: 0xdeadbeef,
+    });
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const stream = await remoteZip.fetchStream("a.txt", undefined, {
+        verifyCrc: true,
+      });
+      await expect(collect(stream)).rejects.toMatchObject({
+        code: "CRC_MISMATCH",
+      });
     } finally {
       server.close();
     }

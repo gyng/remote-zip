@@ -26,7 +26,8 @@ export type RemoteZipErrorCode =
   | "FILE_NOT_FOUND"
   | "LOCAL_HEADER_PARSE_FAILED"
   | "CENTRAL_DIRECTORY_OUT_OF_BOUNDS"
-  | "DECOMPRESSION_LIMIT_EXCEEDED";
+  | "DECOMPRESSION_LIMIT_EXCEEDED"
+  | "CRC_MISMATCH";
 
 export class RemoteZipError extends Error {
   /** Machine-readable error code, for programmatic handling without matching on `message`. */
@@ -385,6 +386,8 @@ export class RemoteZip {
    *   untrusted archives to guard against decompression bombs.
    * @param options.signal Aborts this request (in addition to any instance-level signal).
    * @param options.timeoutMs Per-request timeout for this fetch.
+   * @param options.verifyCrc If set, verify the decompressed output against the
+   *   entry's CRC-32 and throw a {@link RemoteZipError} (`CRC_MISMATCH`) on mismatch.
    * @returns Inflated (uncompressed) bytes of the requested file
    * @throws [RemoteZipError](RemoteZipError) if it fails to parse, fetch, or exceeds limits
    */
@@ -395,6 +398,7 @@ export class RemoteZip {
       maxUncompressedSize?: number;
       signal?: AbortSignal;
       timeoutMs?: number;
+      verifyCrc?: boolean;
     },
   ): Promise<Uint8Array> {
     const { file, response } = await this.fetchEntryResponse(
@@ -417,6 +421,7 @@ export class RemoteZip {
     const max = options?.maxUncompressedSize;
 
     // 0 = stored (uncompressed), 8 = deflate. Treat anything else as raw DEFLATE.
+    let output: Uint8Array;
     if (localFile.data.compressionMethod === 0) {
       if (max !== undefined && compressed.byteLength > max) {
         throw new RemoteZipError(
@@ -424,10 +429,22 @@ export class RemoteZip {
           "DECOMPRESSION_LIMIT_EXCEEDED",
         );
       }
-      return compressed;
+      output = compressed;
+    } else {
+      output = inflateRawCapped(compressed, max);
     }
 
-    return inflateRawCapped(compressed, max);
+    if (options?.verifyCrc) {
+      const actual = crc32(output);
+      if (actual !== file.data.crc32) {
+        throw new RemoteZipError(
+          `CRC-32 mismatch for ${path}: expected ${file.data.crc32}, got ${actual}`,
+          "CRC_MISMATCH",
+        );
+      }
+    }
+
+    return output;
   }
 
   /**
@@ -450,6 +467,7 @@ export class RemoteZip {
       maxUncompressedSize?: number;
       signal?: AbortSignal;
       timeoutMs?: number;
+      verifyCrc?: boolean;
     },
   ): Promise<ReadableStream<Uint8Array>> {
     const { file, response } = await this.fetchEntryResponse(
@@ -465,12 +483,12 @@ export class RemoteZip {
     }
 
     const reader = response.body.getReader();
-    const entries = streamLocalFile(
-      reader,
-      file.data.compressedSize,
-      file.data.compressionMethod,
-      options?.maxUncompressedSize,
-    );
+    const entries = streamLocalFile(reader, {
+      compressedSize: file.data.compressedSize,
+      compressionMethod: file.data.compressionMethod,
+      maxBytes: options?.maxUncompressedSize,
+      expectedCrc: options?.verifyCrc ? file.data.crc32 : undefined,
+    });
 
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
@@ -553,6 +571,43 @@ export class RemoteZip {
   }
 }
 
+/** Precomputed CRC-32 (IEEE 802.3, reflected) lookup table. */
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+/** Incremental CRC-32, for verifying decompressed output (including streaming). */
+class Crc32 {
+  private state = 0xffffffff;
+
+  update(bytes: Uint8Array): void {
+    let c = this.state;
+    for (let i = 0; i < bytes.length; i += 1) {
+      c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    }
+    this.state = c;
+  }
+
+  digest(): number {
+    return (this.state ^ 0xffffffff) >>> 0;
+  }
+}
+
+/** Compute the CRC-32 of `bytes` (the ZIP/IEEE variant). */
+export const crc32 = (bytes: Uint8Array): number => {
+  const crc = new Crc32();
+  crc.update(bytes);
+  return crc.digest();
+};
+
 /**
  * Raw-inflates `data`, aborting with a {@link RemoteZipError} if the decompressed
  * output would exceed `maxBytes`. When `maxBytes` is undefined, inflation is
@@ -614,10 +669,15 @@ const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
  */
 async function* streamLocalFile(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  compressedSize: number,
-  compressionMethod: number,
-  maxBytes?: number,
+  options: {
+    compressedSize: number;
+    compressionMethod: number;
+    maxBytes?: number;
+    expectedCrc?: number;
+  },
 ): AsyncGenerator<Uint8Array> {
+  const { compressedSize, compressionMethod, maxBytes, expectedCrc } = options;
+  const crc = expectedCrc !== undefined ? new Crc32() : undefined;
   let buf = new Uint8Array(0);
   const append = (chunk: Uint8Array) => {
     const next = new Uint8Array(buf.length + chunk.length);
@@ -671,6 +731,7 @@ async function* streamLocalFile(
         "DECOMPRESSION_LIMIT_EXCEEDED",
       );
     }
+    crc?.update(chunk);
     queue.push(chunk);
   };
   const inflator =
@@ -708,6 +769,13 @@ async function* streamLocalFile(
     if (done || !value) break;
     feed(value);
     yield* queue.splice(0);
+  }
+
+  if (crc && crc.digest() !== expectedCrc) {
+    throw new RemoteZipError(
+      `CRC-32 mismatch: expected ${expectedCrc}, got ${crc.digest()}`,
+      "CRC_MISMATCH",
+    );
   }
 }
 
