@@ -21,7 +21,7 @@
   },
   "sideEffects": false,
   "author": "Ng Guoyou <gyng@users.noreply.github.com>",
-  "license": "MIT",
+  "license": "(MIT OR Apache-2.0)",
   "keywords": [
     "zip",
     "remote",
@@ -41,7 +41,8 @@
   },
   "packageManager": "npm@11.11.0",
   "files": [
-    "LICENSE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
     "README.md",
     "package.json",
     "lib/**"
