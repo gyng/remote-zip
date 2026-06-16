@@ -2,59 +2,50 @@
 
 import * as esbuild from "esbuild";
 
-const onEndPlugin = {
-  name: "on-end",
-  setup(build) {
-    build.onEnd((result) => {
-      console.log(`build ended with ${result.errors.length} errors`);
-    });
-  },
-};
-
-let ctx = esbuild.context({
+/** Options shared by both output formats. */
+const shared = {
   entryPoints: ["src/index.ts"],
-  outdir: "lib/esm",
   bundle: true,
   sourcemap: true,
   minify: true,
-  splitting: true,
+};
+
+/** @type {import("esbuild").BuildOptions} */
+const esmOptions = {
+  ...shared,
+  outdir: "lib/esm",
   format: "esm",
+  splitting: true,
   target: ["esnext"],
-  plugins: [onEndPlugin],
-});
+};
 
-// Build esm
-esbuild
-  .build({
-    entryPoints: ["src/index.ts"],
-    outdir: "lib/esm",
-    bundle: true,
-    sourcemap: true,
-    minify: true,
-    splitting: true,
-    format: "esm",
-    target: ["esnext"],
-  })
-  .catch(() => process.exit(1));
+/** @type {import("esbuild").BuildOptions} */
+const cjsOptions = {
+  ...shared,
+  outdir: "lib/cjs",
+  format: "cjs",
+  platform: "node",
+  target: ["node18"],
+};
 
-// Build cjs
-esbuild
-  .build({
-    entryPoints: ["src/index.ts"],
-    outdir: "lib/cjs",
-    bundle: true,
-    sourcemap: true,
-    minify: true,
-    platform: "node",
-    target: ["node18"],
-    plugins: [onEndPlugin],
-  })
-  .catch(() => process.exit(1));
+const watch = process.env["WATCH"] === "1";
 
-// Dev mode
-if (process.env["WATCH"] === "1") {
-  await (await ctx).watch();
-  console.log("esbuild is watching...");
-} else {
-  process.exit(0);
+try {
+  if (watch) {
+    const contexts = await Promise.all([
+      esbuild.context(esmOptions),
+      esbuild.context(cjsOptions),
+    ]);
+    await Promise.all(contexts.map((ctx) => ctx.watch()));
+    console.log("esbuild is watching...");
+  } else {
+    // Await BOTH builds before exiting. The previous version fired the builds
+    // without awaiting and called process.exit(0) immediately, so lib/cjs was
+    // frequently never written.
+    await Promise.all([esbuild.build(esmOptions), esbuild.build(cjsOptions)]);
+    console.log("esbuild: esm + cjs build complete");
+  }
+} catch (err) {
+  console.error(err);
+  process.exit(1);
 }
