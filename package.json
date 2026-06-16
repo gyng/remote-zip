@@ -42,7 +42,7 @@
     "d": "WATCH=1 npm run build",
     "doc:gen": "typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
     "lint:eslint:fix": "npm run lint:eslint -- --fix",
-    "lint:eslint": "eslint . --ext .js --ext .jsx --ext .ts --ext .tsx",
+    "lint:eslint": "eslint .",
     "lint:fix": "npm run lint:prettier:fix && npm run lint:eslint:fix",
     "lint:prettier:fix": "prettier --write .",
     "lint:prettier": "prettier --check .",
@@ -54,19 +54,20 @@
     "ts-types": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/http-server": "^0.12.1",
     "@types/node": "^20.3.1",
     "@types/pako": "^2.0.0",
-    "@typescript-eslint/eslint-plugin": "^5.60.0",
-    "@typescript-eslint/parser": "^5.60.0",
     "@vitest/coverage-v8": "^4.1.9",
     "esbuild": "^0.18.7",
-    "eslint": "^8.43.0",
-    "eslint-config-prettier": "^8.8.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.6.0",
     "http-server": "^14.1.1",
     "prettier": "^3.8.3",
     "typedoc": "^0.24.8",
     "typescript": "^5.1.3",
+    "typescript-eslint": "^8.61.0",
     "vitest": "^4.1.9"
   },
   "dependencies": {
