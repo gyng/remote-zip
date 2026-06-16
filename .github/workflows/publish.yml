@@ -7,8 +7,9 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance
+  id-token: write # npm provenance + attestation signing
   packages: write # GitHub Packages
+  attestations: write # build provenance attestation
 
 jobs:
   publish:
@@ -35,6 +36,14 @@ jobs:
           test -f lib/cjs/index.js
           test -f lib/esm/index.mjs
           test -f lib/types/index.d.ts
+
+      - name: Attest build provenance for the shipped bundles
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            lib/cjs/index.js
+            lib/esm/index.mjs
+            lib/types/index.d.ts
 
       - name: Publish to npm (with provenance)
         run: npm publish --provenance --access public
