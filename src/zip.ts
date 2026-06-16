@@ -1,7 +1,6 @@
 // https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
 // https://rhardih.io/2021/04/listing-the-contents-of-a-remote-zip-archive-without-downloading-the-entire-file/
 
-import fetch from "cross-fetch";
 import { inflateRaw, Inflate } from "pako";
 
 // ZIP file signatures
@@ -343,11 +342,10 @@ export class RemoteZip {
     additionalHeaders?: Headers,
     options?: { maxUncompressedSize?: number }
   ): Promise<Uint8Array> {
-    // TODO: Return a ReadableStream instead of an ArrayBuffer so we don't need
-    // to download the entire thing (to show video previews, for example)
-    // Can't use WHATWG ReadableStream in node, so we avoid using streams until at least node-fetch v3
-    // When cross-fetch upgrades to node-fetch v3, maybe? Testing is a PITA without it.
-    // https://github.com/node-fetch/node-fetch/blob/main/docs/v3-LIMITS.md
+    // TODO: offer a streaming variant returning a ReadableStream so callers can
+    // process large entries without buffering the whole thing (e.g. video
+    // previews). Now feasible: the platform `fetch` exposes `response.body` as a
+    // WHATWG ReadableStream in both Node (>=18) and browsers.
 
     const file = this.centralDirectoryRecords.find(
       (r) => r.data.filename === path
@@ -368,8 +366,7 @@ export class RemoteZip {
       );
     }
 
-    // @ts-expect-error polyfill types
-    const headers = new fetch.Headers(additionalHeaders);
+    const headers = new Headers(additionalHeaders);
     // Local file headers have variable length due to filename/path.
     // To avoid making an additional Range query, we fetch extra bytes for the header.
     // 256: path
@@ -573,8 +570,7 @@ export class RemoteZipPointer {
     // TODO: Fetch again if EOCD length > EOCD_MAX_BYTES
     const EOCD_MAX_BYTES = 128;
     const eocdInitialOffset = Math.max(0, zipByteLength - EOCD_MAX_BYTES);
-    // @ts-expect-error polyfill types
-    const eocdHeaders = new fetch.Headers(additionalHeaders);
+    const eocdHeaders = new Headers(additionalHeaders);
     eocdHeaders.append("Range", `bytes=${eocdInitialOffset}-${zipByteLength}`);
     const eocdRes = await fetch(this.url.toString(), {
       method: this.method,
@@ -620,8 +616,7 @@ export class RemoteZipPointer {
     additionalHeaders?: Headers
   ): Promise<CentralDirectoryRecord[]> {
     // Fetch CD
-    // @ts-expect-error polyfill types
-    const cdHeaders = new fetch.Headers(additionalHeaders);
+    const cdHeaders = new Headers(additionalHeaders);
     cdHeaders.append(
       "Range",
       `bytes=${endOfCentralDirectory.data.centralDirectoryByteOffset}-${
