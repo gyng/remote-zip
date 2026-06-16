@@ -2,6 +2,16 @@
 // https://rhardih.io/2021/04/listing-the-contents-of-a-remote-zip-archive-without-downloading-the-entire-file/
 
 import { inflateRaw, Inflate } from "pako";
+import {
+  Crc32,
+  crc32,
+  decryptZipCrypto,
+  decryptWinzipAes,
+  parseAesExtra,
+  CryptoError,
+} from "./crypto";
+
+export { crc32 } from "./crypto";
 
 // ZIP file signatures
 const SIG_CD = 0x504b0102;
@@ -27,7 +37,9 @@ export type RemoteZipErrorCode =
   | "LOCAL_HEADER_PARSE_FAILED"
   | "CENTRAL_DIRECTORY_OUT_OF_BOUNDS"
   | "DECOMPRESSION_LIMIT_EXCEEDED"
-  | "CRC_MISMATCH";
+  | "CRC_MISMATCH"
+  | "WRONG_PASSWORD"
+  | "DECRYPTION_FAILED";
 
 export class RemoteZipError extends Error {
   /** Machine-readable error code, for programmatic handling without matching on `message`. */
@@ -39,6 +51,43 @@ export class RemoteZipError extends Error {
     this.code = code;
   }
 }
+
+/** Per-call options for {@link RemoteZip.fetch} / {@link RemoteZip.fetchStream}. */
+export interface EntryDecodeOptions {
+  /** If set, decompression aborts and throws once output would exceed this many bytes. */
+  maxUncompressedSize?: number;
+  /** Aborts this request (in addition to any instance-level signal). */
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** If set, verify the decompressed output against the entry's CRC-32. */
+  verifyCrc?: boolean;
+  /** Password for an encrypted entry (traditional ZipCrypto or WinZip AES). */
+  password?: string;
+}
+
+/** Map a low-level crypto failure to a typed RemoteZipError. */
+const mapCryptoError = (err: unknown): RemoteZipError => {
+  if (err instanceof CryptoError) {
+    if (err.reason === "WRONG_PASSWORD") {
+      return new RemoteZipError("Incorrect password (AES)", "WRONG_PASSWORD");
+    }
+    if (err.reason === "UNSUPPORTED") {
+      return new RemoteZipError(
+        "Unsupported AES key strength",
+        "UNSUPPORTED_ENCRYPTION",
+      );
+    }
+    return new RemoteZipError(
+      "AES authentication failed (corrupt data or wrong password)",
+      "DECRYPTION_FAILED",
+    );
+  }
+  return new RemoteZipError(
+    `Decryption failed: ${String(err)}`,
+    "DECRYPTION_FAILED",
+  );
+};
 
 export interface EndOfCentralDirectory {
   meta: Record<string, unknown>;
@@ -394,12 +443,7 @@ export class RemoteZip {
   public async fetch(
     path: string,
     additionalHeaders?: Headers,
-    options?: {
-      maxUncompressedSize?: number;
-      signal?: AbortSignal;
-      timeoutMs?: number;
-      verifyCrc?: boolean;
-    },
+    options?: EntryDecodeOptions,
   ): Promise<Uint8Array> {
     const { file, response } = await this.fetchEntryResponse(
       path,
@@ -416,29 +460,87 @@ export class RemoteZip {
         "LOCAL_HEADER_PARSE_FAILED",
       );
     }
+    return this.decodeEntry(
+      file,
+      new Uint8Array(localFile.meta.compressedData),
+      localFile.data.compressionMethod,
+      options,
+    );
+  }
 
-    const compressed = new Uint8Array(localFile.meta.compressedData);
+  /**
+   * Decrypt (if needed), decompress, and CRC-verify one entry's bytes. Shared by
+   * {@link fetch} and the encrypted path of {@link fetchStream}.
+   */
+  private async decodeEntry(
+    file: CentralDirectoryRecord,
+    compressed: Uint8Array,
+    compressionMethod: number,
+    options?: EntryDecodeOptions,
+  ): Promise<Uint8Array> {
+    let data = compressed;
+    let method = compressionMethod;
+
+    const flags = file.data.generalPurposeBitFlag;
+    if (flags & 0x1) {
+      if (flags & 0x40) {
+        throw new RemoteZipError(
+          "Strong-encrypted ZIP entries are not supported",
+          "UNSUPPORTED_ENCRYPTION",
+        );
+      }
+      if (!options?.password) {
+        throw new RemoteZipError(
+          `Password required for encrypted entry: ${file.data.filename}`,
+          "UNSUPPORTED_ENCRYPTION",
+        );
+      }
+      const password = new TextEncoder().encode(options.password);
+      const aes = method === 99 ? parseAesExtra(file.data.extraField) : null;
+      if (aes) {
+        try {
+          data = await decryptWinzipAes(data, password, aes.strength);
+        } catch (err) {
+          throw mapCryptoError(err);
+        }
+        method = aes.actualMethod;
+      } else {
+        const { plaintext, checkByte } = decryptZipCrypto(data, password);
+        // ZipCrypto's 1-byte password check: high byte of the CRC, or of the DOS
+        // mod-time when a data descriptor is used.
+        const expected =
+          flags & 0x8
+            ? (file.data.lastModifiedTime >> 8) & 0xff
+            : (file.data.crc32 >>> 24) & 0xff;
+        if (checkByte !== expected) {
+          throw new RemoteZipError(
+            `Incorrect password for entry: ${file.data.filename}`,
+            "WRONG_PASSWORD",
+          );
+        }
+        data = plaintext;
+      }
+    }
+
     const max = options?.maxUncompressedSize;
-
-    // 0 = stored (uncompressed), 8 = deflate. Treat anything else as raw DEFLATE.
     let output: Uint8Array;
-    if (localFile.data.compressionMethod === 0) {
-      if (max !== undefined && compressed.byteLength > max) {
+    if (method === 0) {
+      if (max !== undefined && data.byteLength > max) {
         throw new RemoteZipError(
           `Uncompressed size exceeds maxUncompressedSize (${max} bytes)`,
           "DECOMPRESSION_LIMIT_EXCEEDED",
         );
       }
-      output = compressed;
+      output = data;
     } else {
-      output = inflateRawCapped(compressed, max);
+      output = inflateRawCapped(data, max);
     }
 
     if (options?.verifyCrc) {
       const actual = crc32(output);
       if (actual !== file.data.crc32) {
         throw new RemoteZipError(
-          `CRC-32 mismatch for ${path}: expected ${file.data.crc32}, got ${actual}`,
+          `CRC-32 mismatch for ${file.data.filename}: expected ${file.data.crc32}, got ${actual}`,
           "CRC_MISMATCH",
         );
       }
@@ -463,12 +565,7 @@ export class RemoteZip {
   public async fetchStream(
     path: string,
     additionalHeaders?: Headers,
-    options?: {
-      maxUncompressedSize?: number;
-      signal?: AbortSignal;
-      timeoutMs?: number;
-      verifyCrc?: boolean;
-    },
+    options?: EntryDecodeOptions,
   ): Promise<ReadableStream<Uint8Array>> {
     const { file, response } = await this.fetchEntryResponse(
       path,
@@ -480,6 +577,33 @@ export class RemoteZip {
         "Remote ZIP response has no body to stream",
         "LOCAL_HEADER_PARSE_FAILED",
       );
+    }
+
+    // Encrypted entries must be buffered to decrypt/authenticate (AES verifies
+    // an HMAC over the whole ciphertext), so decode fully and emit as one chunk.
+    if (file.data.generalPurposeBitFlag & 0x1) {
+      const localFile = parseOneLocalFile(
+        await response.arrayBuffer(),
+        file.data.compressedSize,
+      );
+      if (!localFile) {
+        throw new RemoteZipError(
+          "cannot parse local file header in remote ZIP",
+          "LOCAL_HEADER_PARSE_FAILED",
+        );
+      }
+      const bytes = await this.decodeEntry(
+        file,
+        new Uint8Array(localFile.meta.compressedData),
+        localFile.data.compressionMethod,
+        options,
+      );
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
     }
 
     const reader = response.body.getReader();
@@ -534,15 +658,6 @@ export class RemoteZip {
       );
     }
 
-    // Bit 0 of the general-purpose flag marks an encrypted entry. We cannot
-    // decrypt, and feeding ciphertext to inflate fails opaquely, so reject early.
-    if (file.data.generalPurposeBitFlag & 0x1) {
-      throw new RemoteZipError(
-        `Encrypted ZIP entries are not supported: ${path}`,
-        "UNSUPPORTED_ENCRYPTION",
-      );
-    }
-
     const headers = new Headers(additionalHeaders);
     // Local file headers have variable length due to filename/path.
     // To avoid making an additional Range query, we fetch extra bytes for the header.
@@ -570,43 +685,6 @@ export class RemoteZip {
     return { file, response };
   }
 }
-
-/** Precomputed CRC-32 (IEEE 802.3, reflected) lookup table. */
-const CRC32_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n += 1) {
-    let c = n;
-    for (let k = 0; k < 8; k += 1) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-/** Incremental CRC-32, for verifying decompressed output (including streaming). */
-class Crc32 {
-  private state = 0xffffffff;
-
-  update(bytes: Uint8Array): void {
-    let c = this.state;
-    for (let i = 0; i < bytes.length; i += 1) {
-      c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
-    }
-    this.state = c;
-  }
-
-  digest(): number {
-    return (this.state ^ 0xffffffff) >>> 0;
-  }
-}
-
-/** Compute the CRC-32 of `bytes` (the ZIP/IEEE variant). */
-export const crc32 = (bytes: Uint8Array): number => {
-  const crc = new Crc32();
-  crc.update(bytes);
-  return crc.digest();
-};
 
 /**
  * Raw-inflates `data`, aborting with a {@link RemoteZipError} if the decompressed

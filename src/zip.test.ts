@@ -14,6 +14,7 @@ import {
   vi,
 } from "vitest";
 import { deflateRaw } from "pako";
+import { encryptZipCrypto, encryptWinzipAes } from "./crypto";
 import {
   parseZipDatetime,
   isZip64,
@@ -28,6 +29,8 @@ import {
   RemoteZipError,
   EndOfCentralDirectory,
 } from ".";
+
+const encode = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 /**
  * Send `body` over HTTP with Range support (the ~30 lines of node:http + node:fs
@@ -462,6 +465,220 @@ function buildMinimalZip(
 
   return buf;
 }
+
+/** Build a single-entry "a.txt" ZIP from a (possibly encrypted) payload. */
+function buildSingleEntryZip(params: {
+  method: number;
+  flags: number;
+  crc: number;
+  data: Uint8Array;
+  uncompressedSize: number;
+  extra?: Uint8Array;
+}): Uint8Array {
+  const { method, flags, crc, data, uncompressedSize } = params;
+  const extra = params.extra ?? new Uint8Array(0);
+  const name = new TextEncoder().encode("a.txt");
+
+  const lfhLen = 30 + name.length + extra.length + data.length;
+  const cdLen = 46 + name.length + extra.length;
+  const buf = new Uint8Array(lfhLen + cdLen + 22);
+  const dv = new DataView(buf.buffer);
+
+  // Local file header
+  dv.setUint32(0, 0x504b0304);
+  dv.setUint16(4, 45, true);
+  dv.setUint16(6, flags, true);
+  dv.setUint16(8, method, true);
+  dv.setUint32(14, crc, true);
+  dv.setUint32(18, data.length, true);
+  dv.setUint32(22, uncompressedSize, true);
+  dv.setUint16(26, name.length, true);
+  dv.setUint16(28, extra.length, true);
+  buf.set(name, 30);
+  buf.set(extra, 30 + name.length);
+  buf.set(data, 30 + name.length + extra.length);
+
+  // Central directory
+  const cdOff = lfhLen;
+  dv.setUint32(cdOff, 0x504b0102);
+  dv.setUint16(cdOff + 6, 45, true);
+  dv.setUint16(cdOff + 8, flags, true);
+  dv.setUint16(cdOff + 10, method, true);
+  dv.setUint32(cdOff + 16, crc, true);
+  dv.setUint32(cdOff + 20, data.length, true);
+  dv.setUint32(cdOff + 24, uncompressedSize, true);
+  dv.setUint16(cdOff + 28, name.length, true);
+  dv.setUint16(cdOff + 30, extra.length, true);
+  dv.setUint32(cdOff + 42, 0, true);
+  buf.set(name, cdOff + 46);
+  buf.set(extra, cdOff + 46 + name.length);
+
+  // End of central directory
+  const eOff = lfhLen + cdLen;
+  dv.setUint32(eOff, 0x504b0506);
+  dv.setUint16(eOff + 8, 1, true);
+  dv.setUint16(eOff + 10, 1, true);
+  dv.setUint32(eOff + 12, cdLen, true);
+  dv.setUint32(eOff + 16, cdOff, true);
+  return buf;
+}
+
+function aesExtraField(strength: number, actualMethod: number): Uint8Array {
+  const extra = new Uint8Array(11);
+  const dv = new DataView(extra.buffer);
+  dv.setUint16(0, 0x9901, true); // header id
+  dv.setUint16(2, 7, true); // data size
+  dv.setUint16(4, 2, true); // vendor version (AE-2)
+  extra[6] = 0x41; // "A"
+  extra[7] = 0x45; // "E"
+  extra[8] = strength;
+  dv.setUint16(9, actualMethod, true);
+  return extra;
+}
+
+describe("encryption", () => {
+  const password = "hunter2";
+  const content = new TextEncoder().encode("top secret payload ".repeat(20));
+
+  const serveZip = async (zip: Uint8Array) => {
+    const server = http.createServer((req, res) => sendBody(req, res, zip));
+    const port = await listen(server);
+    const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+    return { url, close: () => server.close() };
+  };
+
+  it("decrypts a traditional ZipCrypto entry with the correct password", async () => {
+    const compressed = deflateRaw(content);
+    const crc = crc32(content);
+    const header = new Uint8Array(12);
+    header[11] = (crc >>> 24) & 0xff; // ZipCrypto check byte
+    const data = encryptZipCrypto(compressed, encode(password), header);
+    const zip = buildSingleEntryZip({
+      method: 8,
+      flags: 0x1,
+      crc,
+      data,
+      uncompressedSize: content.length,
+    });
+    const { url, close } = await serveZip(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const out = await remoteZip.fetch("a.txt", undefined, { password });
+      expect(out).toEqual(content);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a ZipCrypto entry with the wrong password", async () => {
+    const compressed = deflateRaw(content);
+    const crc = crc32(content);
+    const header = new Uint8Array(12);
+    header[11] = (crc >>> 24) & 0xff;
+    const data = encryptZipCrypto(compressed, encode(password), header);
+    const zip = buildSingleEntryZip({
+      method: 8,
+      flags: 0x1,
+      crc,
+      data,
+      uncompressedSize: content.length,
+    });
+    const { url, close } = await serveZip(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { password: "wrong" }),
+      ).rejects.toMatchObject({ code: "WRONG_PASSWORD" });
+    } finally {
+      close();
+    }
+  });
+
+  it("requires a password for an encrypted entry", async () => {
+    const data = encryptZipCrypto(
+      content,
+      encode(password),
+      new Uint8Array(12),
+    );
+    const zip = buildSingleEntryZip({
+      method: 0,
+      flags: 0x1,
+      crc: crc32(content),
+      data,
+      uncompressedSize: content.length,
+    });
+    const { url, close } = await serveZip(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(remoteZip.fetch("a.txt")).rejects.toMatchObject({
+        code: "UNSUPPORTED_ENCRYPTION",
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("decrypts a WinZip AES-256 entry (fetch and fetchStream)", async () => {
+    const strength = 3;
+    const compressed = deflateRaw(content);
+    const salt = new Uint8Array(16).map((_, i) => i + 1);
+    const data = await encryptWinzipAes(
+      compressed,
+      encode(password),
+      strength,
+      salt,
+    );
+    const zip = buildSingleEntryZip({
+      method: 99,
+      flags: 0x1,
+      crc: 0, // AE-2 stores no CRC
+      data,
+      uncompressedSize: content.length,
+      extra: aesExtraField(strength, 8),
+    });
+    const { url, close } = await serveZip(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      expect(await remoteZip.fetch("a.txt", undefined, { password })).toEqual(
+        content,
+      );
+      const stream = await remoteZip.fetchStream("a.txt", undefined, {
+        password,
+      });
+      expect(await collect(stream)).toEqual(content);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a WinZip AES entry with the wrong password", async () => {
+    const strength = 1;
+    const salt = new Uint8Array(8).map((_, i) => i + 1);
+    const data = await encryptWinzipAes(
+      content,
+      encode(password),
+      strength,
+      salt,
+    );
+    const zip = buildSingleEntryZip({
+      method: 99,
+      flags: 0x1,
+      crc: 0,
+      data,
+      uncompressedSize: content.length,
+      extra: aesExtraField(strength, 0),
+    });
+    const { url, close } = await serveZip(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { password: "nope" }),
+      ).rejects.toMatchObject({ code: "WRONG_PASSWORD" });
+    } finally {
+      close();
+    }
+  });
+});
 
 describe("decodeZipString (CP437 vs UTF-8)", () => {
   it("decodes CP437 high bytes when the UTF-8 flag is unset", () => {

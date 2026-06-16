@@ -11,6 +11,7 @@ Without downloading the entire ZIP:
 - Fetch individual files in a remote ZIP (buffered or streaming)
 - Fetch file listings
 - ZIP64 archives (>4 GiB / >65,535 entries)
+- Encrypted entries: traditional ZipCrypto and WinZip AES (AE-1/AE-2)
 - CP437 and UTF-8 filenames; optional CRC-32 verification
 
 The gist of what the library does is:
@@ -22,8 +23,12 @@ The gist of what the library does is:
 
 ## Limitations
 
-- No encrypted ZIP support (encrypted entries are detected and rejected)
+- PKWare _strong_ encryption (general-purpose bit 6) is detected and rejected
 - Multi-disk / split archives are not supported
+
+> Decrypting WinZip AES entries uses the Web Crypto API (`crypto.subtle`), which
+> in browsers is only available in a secure context (HTTPS or `localhost`).
+> Traditional ZipCrypto works everywhere but is cryptographically weak.
 
 ## Install
 
@@ -87,6 +92,7 @@ const remoteZip = await new RemoteZipPointer({
 const uncompressedBytes = await remoteZip.fetch("test.txt", additionalHeaders, {
   maxUncompressedSize: 50 * 1024 * 1024,
   verifyCrc: true, // check the decompressed bytes against the entry's CRC-32
+  password: "hunter2", // for ZipCrypto / WinZip AES encrypted entries
 });
 ```
 
