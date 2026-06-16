@@ -106,6 +106,18 @@ function listen(server: Server): Promise<number> {
   });
 }
 
+/** Serve a single buffer with Range support; returns its URL and a closer. */
+async function serveBuffer(
+  zip: Uint8Array,
+): Promise<{ url: URL; close: () => void }> {
+  const server = http.createServer((req, res) => sendBody(req, res, zip));
+  const port = await listen(server);
+  return {
+    url: new URL(`http://127.0.0.1:${port}/archive.zip`),
+    close: () => server.close(),
+  };
+}
+
 describe("RemoteZip integration tests", () => {
   let server: Server;
   const serverCheck = vi.fn<(req: http.IncomingMessage) => void>();
@@ -677,6 +689,421 @@ describe("encryption", () => {
     } finally {
       close();
     }
+  });
+});
+
+describe("error paths and edge cases", () => {
+  const content = encode("payload payload payload");
+
+  it("throws when the server omits Content-Length on HEAD", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { "Transfer-Encoding": "chunked" });
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/a.zip`);
+      await expect(
+        new RemoteZipPointer({ url }).populate(),
+      ).rejects.toMatchObject({ code: "CONTENT_LENGTH_MISSING" });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("throws EOCD_NOT_FOUND for a file with no EOCD", async () => {
+    const { url, close } = await serveBuffer(new Uint8Array(200));
+    try {
+      await expect(
+        new RemoteZipPointer({ url }).populate(),
+      ).rejects.toMatchObject({ code: "EOCD_NOT_FOUND" });
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a central directory that overruns the archive", async () => {
+    const buf = new Uint8Array(22);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, 0x504b0506);
+    dv.setUint16(8, 1, true);
+    dv.setUint16(10, 1, true);
+    dv.setUint32(12, 999999, true); // cd size >> archive
+    dv.setUint32(16, 0, true);
+    const { url, close } = await serveBuffer(buf);
+    try {
+      await expect(
+        new RemoteZipPointer({ url }).populate(),
+      ).rejects.toMatchObject({ code: "CENTRAL_DIRECTORY_OUT_OF_BOUNDS" });
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects ZIP64 sentinels with no locator", async () => {
+    const buf = new Uint8Array(22);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, 0x504b0506);
+    dv.setUint16(8, 1, true);
+    dv.setUint16(10, 1, true);
+    dv.setUint32(12, 0xffffffff, true);
+    dv.setUint32(16, 0xffffffff, true);
+    const { url, close } = await serveBuffer(buf);
+    try {
+      await expect(
+        new RemoteZipPointer({ url }).populate(),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED_ZIP64" });
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a ZIP64 locator pointing at a missing record", async () => {
+    const buf = new Uint8Array(20 + 20 + 22); // filler + locator + eocd
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(20, 0x504b0607); // locator signature
+    dv.setBigUint64(28, 0n, true); // zip64 EOCD offset -> 0 (filler, no record)
+    dv.setUint32(40, 0x504b0506); // eocd
+    dv.setUint16(48, 1, true);
+    dv.setUint16(50, 1, true);
+    dv.setUint32(52, 0xffffffff, true);
+    dv.setUint32(56, 0xffffffff, true);
+    const { url, close } = await serveBuffer(buf);
+    try {
+      await expect(
+        new RemoteZipPointer({ url }).populate(),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED_ZIP64" });
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a corrupt local file header (fetch and fetchStream)", async () => {
+    const zip = buildMinimalZip({ content });
+    zip[0] = 0; // corrupt the local file header signature
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(remoteZip.fetch("a.txt")).rejects.toMatchObject({
+        code: "LOCAL_HEADER_PARSE_FAILED",
+      });
+      const stream = await remoteZip.fetchStream("a.txt");
+      await expect(collect(stream)).rejects.toMatchObject({
+        code: "LOCAL_HEADER_PARSE_FAILED",
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("surfaces an inflate error for corrupt deflate (fetch and fetchStream)", async () => {
+    const compressed = deflateRaw(content);
+    compressed.set([0xff, 0xff, 0xff, 0xff], 1); // corrupt the deflate stream
+    const zip = buildSingleEntryZip({
+      method: 8,
+      flags: 0,
+      crc: crc32(content),
+      data: compressed,
+      uncompressedSize: content.length,
+    });
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      // unbounded inflate, capped inflate, and streaming inflate paths
+      await expect(remoteZip.fetch("a.txt")).rejects.toBeInstanceOf(
+        RemoteZipError,
+      );
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { maxUncompressedSize: 1_000_000 }),
+      ).rejects.toBeInstanceOf(RemoteZipError);
+      const stream = await remoteZip.fetchStream("a.txt");
+      await expect(collect(stream)).rejects.toBeInstanceOf(RemoteZipError);
+    } finally {
+      close();
+    }
+  });
+
+  it("enforces maxUncompressedSize across multiple inflate chunks", async () => {
+    const big = encode("x".repeat(200_000));
+    const zip = buildSingleEntryZip({
+      method: 8,
+      flags: 0,
+      crc: crc32(big),
+      data: deflateRaw(big),
+      uncompressedSize: big.length,
+    });
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { maxUncompressedSize: 1000 }),
+      ).rejects.toMatchObject({ code: "DECOMPRESSION_LIMIT_EXCEEDED" });
+    } finally {
+      close();
+    }
+  });
+
+  it("enforces maxUncompressedSize on a stored entry", async () => {
+    const zip = buildMinimalZip({ content: encode("hello") }); // stored
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { maxUncompressedSize: 2 }),
+      ).rejects.toMatchObject({ code: "DECOMPRESSION_LIMIT_EXCEEDED" });
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects strong-encrypted entries", async () => {
+    const zip = buildSingleEntryZip({
+      method: 0,
+      flags: 0x1 | 0x40, // encrypted + strong encryption
+      crc: 0,
+      data: new Uint8Array(20),
+      uncompressedSize: 8,
+    });
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      await expect(
+        remoteZip.fetch("a.txt", undefined, { password: "x" }),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED_ENCRYPTION" });
+    } finally {
+      close();
+    }
+  });
+
+  it("decrypts ZipCrypto with the data-descriptor check byte", async () => {
+    const compressed = deflateRaw(content);
+    const header = new Uint8Array(12);
+    header[11] = 0; // mod-time high byte is 0 in our builder
+    const data = encryptZipCrypto(compressed, encode("pw"), header);
+    const zip = buildSingleEntryZip({
+      method: 8,
+      flags: 0x1 | 0x8, // encrypted + data descriptor
+      crc: crc32(content),
+      data,
+      uncompressedSize: content.length,
+    });
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      expect(
+        await remoteZip.fetch("a.txt", undefined, { password: "pw" }),
+      ).toEqual(content);
+    } finally {
+      close();
+    }
+  });
+
+  it("maps AES failures: unsupported strength and bad MAC", async () => {
+    // Unsupported strength: claim strength 4 in the extra.
+    const bogus = buildSingleEntryZip({
+      method: 99,
+      flags: 0x1,
+      crc: 0,
+      data: new Uint8Array(40),
+      uncompressedSize: 8,
+      extra: aesExtraField(4, 8),
+    });
+    const a = await serveBuffer(bogus);
+    try {
+      const rz = await new RemoteZipPointer({ url: a.url }).populate();
+      await expect(
+        rz.fetch("a.txt", undefined, { password: "x" }),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED_ENCRYPTION" });
+    } finally {
+      a.close();
+    }
+
+    // Bad MAC: a valid AES blob with a flipped ciphertext byte.
+    const salt = new Uint8Array(16).map((_, i) => i);
+    const blob = await encryptWinzipAes(content, encode("pw"), 3, salt);
+    blob[blob.length - 11] ^= 0xff;
+    const tampered = buildSingleEntryZip({
+      method: 99,
+      flags: 0x1,
+      crc: 0,
+      data: blob,
+      uncompressedSize: content.length,
+      extra: aesExtraField(3, 0),
+    });
+    const b = await serveBuffer(tampered);
+    try {
+      const rz = await new RemoteZipPointer({ url: b.url }).populate();
+      await expect(
+        rz.fetch("a.txt", undefined, { password: "pw" }),
+      ).rejects.toMatchObject({ code: "DECRYPTION_FAILED" });
+    } finally {
+      b.close();
+    }
+  });
+
+  it("releases the reader when a stream is cancelled", async () => {
+    const zip = buildMinimalZip({ content: encode("abc".repeat(100)) });
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const stream = await remoteZip.fetchStream("a.txt");
+      const reader = stream.getReader();
+      await reader.read();
+      await reader.cancel();
+    } finally {
+      close();
+    }
+  });
+
+  it("errors a stream whose local header is truncated", async () => {
+    // Entry at offset 0; pad the archive so only the file fetch starts at 0.
+    const zip = buildMinimalZip({ content: encode("x".repeat(200)) });
+    const server = http.createServer((req, res) => {
+      const m = /^bytes=(\d+)-/.exec(req.headers["range"] ?? "");
+      if (req.method === "GET" && m && m[1] === "0") {
+        res.statusCode = 206;
+        res.setHeader("Content-Range", `bytes 0-9/${zip.length}`);
+        res.setHeader("Content-Length", "10");
+        res.end(zip.subarray(0, 10)); // truncated header (< 30 bytes)
+        return;
+      }
+      sendBody(req, res, zip);
+    });
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const stream = await remoteZip.fetchStream("a.txt");
+      await expect(collect(stream)).rejects.toMatchObject({
+        code: "LOCAL_HEADER_PARSE_FAILED",
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("streams a large stored entry across multiple reads", async () => {
+    const big = encode("y".repeat(300_000));
+    const zip = buildMinimalZip({ content: big });
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const out = await collect(await remoteZip.fetchStream("a.txt"));
+      expect(out.length).toBe(big.length);
+    } finally {
+      close();
+    }
+  });
+
+  it("ends a stream early when the body is shorter than the compressed size", async () => {
+    const zip = buildMinimalZip({ content: encode("x".repeat(200)) }); // stored
+    const server = http.createServer((req, res) => {
+      const m = /^bytes=(\d+)-/.exec(req.headers["range"] ?? "");
+      if (req.method === "GET" && m && m[1] === "0") {
+        res.statusCode = 206;
+        res.setHeader("Content-Length", "50");
+        res.end(zip.subarray(0, 50)); // header + only part of the data
+        return;
+      }
+      sendBody(req, res, zip);
+    });
+    const port = await listen(server);
+    try {
+      const url = new URL(`http://127.0.0.1:${port}/archive.zip`);
+      const remoteZip = await new RemoteZipPointer({ url }).populate();
+      const out = await collect(await remoteZip.fetchStream("a.txt"));
+      expect(out.length).toBeLessThan(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("combines an instance signal with a per-request timeout", async () => {
+    const zip = buildMinimalZip();
+    const { url, close } = await serveBuffer(zip);
+    try {
+      const remoteZip = await new RemoteZipPointer({
+        url,
+        signal: new AbortController().signal,
+        timeoutMs: 5000,
+      }).populate();
+      expect(remoteZip.files()).toHaveLength(1);
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("parser edge cases", () => {
+  it("rejects a ZIP64 value beyond MAX_SAFE_INTEGER", () => {
+    const buf = new ArrayBuffer(56);
+    const dv = new DataView(buf);
+    dv.setUint32(0, 0x504b0606);
+    dv.setBigUint64(32, 1n, true);
+    dv.setBigUint64(40, 46n, true);
+    dv.setBigUint64(48, 0xffffffffffffffffn, true); // > 2^53
+    expect(() => parseZip64EOCD(buf)).toThrow(RemoteZipError);
+  });
+
+  it("reads the ZIP64 disk field from the extra", () => {
+    const name = encode("a");
+    const extra = new Uint8Array(8);
+    const edv = new DataView(extra.buffer);
+    edv.setUint16(0, 0x0001, true);
+    edv.setUint16(2, 4, true);
+    edv.setUint32(4, 7, true); // disk = 7
+    const buf = new Uint8Array(46 + name.length + extra.length);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, 0x504b0102);
+    dv.setUint16(28, name.length, true);
+    dv.setUint16(30, extra.length, true);
+    dv.setUint16(34, 0xffff, true); // disk sentinel
+    buf.set(name, 46);
+    buf.set(extra, 46 + name.length);
+    expect(parseOneCD(buf.buffer)?.data.startingDiskNumber).toBe(7);
+  });
+
+  it("falls back to raw values when the ZIP64 extra is absent", () => {
+    const name = encode("a");
+    const extra = new Uint8Array([0x99, 0x00, 0x02, 0x00, 0xaa, 0xbb]); // not 0x0001
+    const buf = new Uint8Array(46 + name.length + extra.length);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, 0x504b0102);
+    dv.setUint32(20, 0xffffffff, true); // compressed size sentinel
+    dv.setUint16(28, name.length, true);
+    dv.setUint16(30, extra.length, true);
+    buf.set(name, 46);
+    buf.set(extra, 46 + name.length);
+    expect(parseOneCD(buf.buffer)?.data.compressedSize).toBe(0xffffffff);
+  });
+
+  it("parseAllCDs skips non-records and a truncated trailing signature", () => {
+    const cd = new Uint8Array(46 + 1);
+    const cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x504b0102); // CD signature
+    cv.setUint16(28, 1, true); // filename length
+    cd[46] = 0x61; // "a"
+    // [4 non-signature bytes][valid CD][truncated CD signature with no room to parse]
+    const buf = new Uint8Array(4 + cd.length + 4);
+    const dv = new DataView(buf.buffer);
+    buf.set(cd, 4);
+    dv.setUint32(4 + cd.length, 0x504b0102);
+    const cds = parseAllCDs(buf.buffer);
+    expect(cds).toHaveLength(1);
+    expect(cds[0].data.filename).toBe("a");
+  });
+
+  it("parses a local file header with a data descriptor + optional signature", () => {
+    const buf = new Uint8Array(30 + 1 + 3 + 16);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, 0x504b0304);
+    dv.setUint16(6, 0x8, true); // data descriptor flag
+    dv.setUint16(26, 1, true); // filename length
+    buf[30] = 0x61; // "a"
+    buf.set([1, 2, 3], 31); // 3 compressed bytes
+    dv.setUint32(34, 0x504b0708); // optional data descriptor signature
+    const parsed = parseOneLocalFile(buf.buffer, 3);
+    expect(parsed?.meta.dataDescriptor?.optionalSignature).toBeDefined();
   });
 });
 

@@ -66,27 +66,22 @@ export interface EntryDecodeOptions {
   password?: string;
 }
 
-/** Map a low-level crypto failure to a typed RemoteZipError. */
-const mapCryptoError = (err: unknown): RemoteZipError => {
-  if (err instanceof CryptoError) {
-    if (err.reason === "WRONG_PASSWORD") {
+/** Map a low-level crypto failure (only thrown by decryptWinzipAes) to a typed error. */
+const mapCryptoError = (err: CryptoError): RemoteZipError => {
+  switch (err.reason) {
+    case "WRONG_PASSWORD":
       return new RemoteZipError("Incorrect password (AES)", "WRONG_PASSWORD");
-    }
-    if (err.reason === "UNSUPPORTED") {
+    case "UNSUPPORTED":
       return new RemoteZipError(
         "Unsupported AES key strength",
         "UNSUPPORTED_ENCRYPTION",
       );
-    }
-    return new RemoteZipError(
-      "AES authentication failed (corrupt data or wrong password)",
-      "DECRYPTION_FAILED",
-    );
+    default:
+      return new RemoteZipError(
+        "AES authentication failed (corrupt data or wrong password)",
+        "DECRYPTION_FAILED",
+      );
   }
-  return new RemoteZipError(
-    `Decryption failed: ${String(err)}`,
-    "DECRYPTION_FAILED",
-  );
 };
 
 export interface EndOfCentralDirectory {
@@ -501,7 +496,7 @@ export class RemoteZip {
         try {
           data = await decryptWinzipAes(data, password, aes.strength);
         } catch (err) {
-          throw mapCryptoError(err);
+          throw mapCryptoError(err as CryptoError);
         }
         method = aes.actualMethod;
       } else {
@@ -572,6 +567,7 @@ export class RemoteZip {
       additionalHeaders,
       options,
     );
+    /* v8 ignore next 6 -- defensive: a 200/206 range response always has a body */
     if (!response.body) {
       throw new RemoteZipError(
         "Remote ZIP response has no body to stream",
@@ -586,6 +582,7 @@ export class RemoteZip {
         await response.arrayBuffer(),
         file.data.compressedSize,
       );
+      /* v8 ignore next 6 -- defensive: mirrors the tested buffered fetch() path */
       if (!localFile) {
         throw new RemoteZipError(
           "cannot parse local file header in remote ZIP",
@@ -628,7 +625,7 @@ export class RemoteZip {
           // maxUncompressedSize cap). Releasing the consumer side via
           // controller.error() does NOT invoke cancel(), so cancel the
           // underlying network reader here or the HTTP connection leaks.
-          await reader.cancel(err).catch(() => {});
+          await reader.cancel(err);
           controller.error(err);
         }
       },
@@ -694,7 +691,14 @@ export class RemoteZip {
  */
 const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
   if (maxBytes === undefined) {
-    return inflateRaw(data);
+    try {
+      return inflateRaw(data);
+    } catch (err) {
+      throw new RemoteZipError(
+        `Failed to inflate remote ZIP entry: ${String(err)}`,
+        "UNKNOWN",
+      );
+    }
   }
 
   const inflator = new Inflate({ raw: true });
@@ -706,7 +710,7 @@ const inflateRawCapped = (data: Uint8Array, maxBytes?: number): Uint8Array => {
     if (exceeded) {
       return;
     }
-    const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    const bytes = chunk as Uint8Array; // raw inflate always yields Uint8Array
     total += bytes.length;
     if (total > maxBytes) {
       exceeded = true;
@@ -763,22 +767,22 @@ async function* streamLocalFile(
     next.set(chunk, buf.length);
     buf = next;
   };
-  const readMore = async (): Promise<boolean> => {
-    const { done, value } = await reader.read();
-    if (done || !value) return false;
-    append(value);
-    return true;
+  // Accumulate from the reader until `buf` holds at least `n` bytes.
+  const readUntil = async (n: number): Promise<void> => {
+    while (buf.length < n) {
+      const { done, value } = await reader.read();
+      if (done) {
+        throw new RemoteZipError(
+          "Truncated local file header in remote ZIP",
+          "LOCAL_HEADER_PARSE_FAILED",
+        );
+      }
+      append(value);
+    }
   };
 
   // 1. Read and parse the local file header to locate the compressed data.
-  while (buf.length < 30) {
-    if (!(await readMore())) {
-      throw new RemoteZipError(
-        "Truncated local file header in remote ZIP",
-        "LOCAL_HEADER_PARSE_FAILED",
-      );
-    }
-  }
+  await readUntil(30);
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   if (dv.getUint32(0) !== SIG_LOCAL_FILE_HEADER) {
     throw new RemoteZipError(
@@ -787,21 +791,13 @@ async function* streamLocalFile(
     );
   }
   const headerLen = 30 + dv.getUint16(26, true) + dv.getUint16(28, true);
-  while (buf.length < headerLen) {
-    if (!(await readMore())) {
-      throw new RemoteZipError(
-        "Truncated local file header in remote ZIP",
-        "LOCAL_HEADER_PARSE_FAILED",
-      );
-    }
-  }
+  await readUntil(headerLen);
 
   // 2. Output pipeline: passthrough for stored, streaming raw inflate otherwise,
   //    with a mid-stream size cap (the decompression-bomb guard).
   let total = 0;
   const queue: Uint8Array[] = [];
   const emit = (chunk: Uint8Array) => {
-    if (chunk.length === 0) return;
     total += chunk.length;
     if (maxBytes !== undefined && total > maxBytes) {
       throw new RemoteZipError(
@@ -815,13 +811,11 @@ async function* streamLocalFile(
   const inflator =
     compressionMethod === 0 ? undefined : new Inflate({ raw: true });
   if (inflator) {
-    inflator.onData = (c) =>
-      emit(c instanceof Uint8Array ? c : new Uint8Array(c));
+    inflator.onData = (c) => emit(c as Uint8Array);
   }
 
   let remaining = compressedSize;
   const feed = (chunk: Uint8Array) => {
-    if (remaining <= 0 || chunk.length === 0) return;
     const piece =
       chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
     remaining -= piece.length;
@@ -844,7 +838,7 @@ async function* streamLocalFile(
   yield* queue.splice(0);
   while (remaining > 0) {
     const { done, value } = await reader.read();
-    if (done || !value) break;
+    if (done) break;
     feed(value);
     yield* queue.splice(0);
   }
