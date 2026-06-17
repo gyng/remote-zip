@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node + npm registry
         uses: actions/setup-node@v6
@@ -42,10 +42,16 @@ jobs:
         with:
           subject-path: "lib/**/*"
 
-      - name: Publish to npm (with provenance)
+      # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node LTS still ships npm 10.x.
+      # --min-release-age=0 overrides the repo .npmrc cooldown for this self-upgrade only.
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest --min-release-age=0
+
+      # No NPM_TOKEN: npm exchanges the GitHub OIDC token for a short-lived
+      # publish token via the Trusted Publisher configured on npmjs.com.
+      # Provenance is generated automatically under trusted publishing.
+      - name: Publish to npm (Trusted Publishing via OIDC)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Set up .npmrc for GitHub Packages
         uses: actions/setup-node@v6
