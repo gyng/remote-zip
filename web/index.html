@@ -16,8 +16,7 @@
         --soft: #f5f7f9;
         --border: #e3e8ec;
         --accent: #2b6cb0;
-        --mono:
-          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -164,8 +163,8 @@
     <main>
       <h1>remote-zip</h1>
       <p class="tagline">
-        List and fetch individual files from a remote ZIP archive over HTTP
-        Range requests — without downloading the whole archive.
+        List and fetch individual files from a remote ZIP archive over HTTP Range requests — without
+        downloading the whole archive.
       </p>
       <p class="links">
         <a href="./api/">API docs</a>
@@ -197,17 +196,12 @@ const bytes = await zip.fetch("path/in/zip.txt"); // -&gt; Uint8Array</code></pr
       <h2>Try it</h2>
       <div class="demo">
         <div class="row">
-          <input
-            id="url"
-            type="text"
-            value="./sample.zip"
-            aria-label="ZIP URL"
-          />
+          <input id="url" type="text" value="./sample.zip" aria-label="ZIP URL" />
           <button id="list">List files</button>
         </div>
         <p class="out" id="status">
-          Loads a small sample ZIP served from this page. Try your own URL — the
-          server must allow CORS and HTTP Range requests.
+          Loads a small sample ZIP served from this page. Try your own URL — the server must allow
+          CORS and HTTP Range requests.
         </p>
         <div id="result"></div>
         <div class="out" id="preview"></div>
@@ -227,8 +221,7 @@ const bytes = await zip.fetch("path/in/zip.txt"); // -&gt; Uint8Array</code></pr
       const result = $("result");
       const preview = $("preview");
 
-      const fmtSize = (n) =>
-        n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`;
+      const fmtSize = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`);
 
       async function listFiles() {
         result.innerHTML = "";
@@ -269,9 +262,7 @@ const bytes = await zip.fetch("path/in/zip.txt"); // -&gt; Uint8Array</code></pr
           const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
           const printable =
             // crude: mostly-printable -> show as text, else hex
-            [...text].filter(
-              (c) => c.charCodeAt(0) < 32 && !"\n\r\t".includes(c),
-            ).length <
+            [...text].filter((c) => c.charCodeAt(0) < 32 && !"\n\r\t".includes(c)).length <
             bytes.length * 0.05;
           if (printable) {
             preview.textContent = `${name} (${bytes.length} bytes):\n\n${text.slice(0, 2000)}`;

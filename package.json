@@ -2,7 +2,35 @@
   "name": "@gyng/remote-zip",
   "version": "1.0.0",
   "description": "Fetch file listings and individual files from a remote ZIP archive over HTTP Range requests, without downloading the whole archive.",
+  "keywords": [
+    "browser",
+    "central-directory",
+    "fetch",
+    "http",
+    "range",
+    "remote",
+    "stream",
+    "zip"
+  ],
+  "homepage": "https://github.com/gyng/remote-zip#readme",
+  "bugs": {
+    "url": "https://github.com/gyng/remote-zip/issues"
+  },
+  "license": "(MIT OR Apache-2.0)",
+  "author": "Ng Guoyou <gyng@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gyng/remote-zip.git"
+  },
+  "files": [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "README.md",
+    "package.json",
+    "lib/**"
+  ],
   "type": "commonjs",
+  "sideEffects": false,
   "main": "lib/cjs/index.js",
   "module": "lib/esm/index.mjs",
   "types": "lib/types/index.d.ts",
@@ -19,49 +47,13 @@
     },
     "./package.json": "./package.json"
   },
-  "sideEffects": false,
-  "author": "Ng Guoyou <gyng@users.noreply.github.com>",
-  "license": "(MIT OR Apache-2.0)",
-  "keywords": [
-    "zip",
-    "remote",
-    "http",
-    "range",
-    "fetch",
-    "stream",
-    "central-directory",
-    "browser"
-  ],
-  "homepage": "https://github.com/gyng/remote-zip#readme",
-  "bugs": {
-    "url": "https://github.com/gyng/remote-zip/issues"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "packageManager": "npm@11.11.0",
-  "files": [
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "README.md",
-    "package.json",
-    "lib/**"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/gyng/remote-zip.git"
-  },
   "scripts": {
     "build": "rm -rf lib/* && npm run ts-types && node ./esbuild.mjs",
     "d": "WATCH=1 npm run build",
-    "doc:gen": "typedoc src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ./docs/api",
+    "doc:gen": "npm --prefix tools/typedoc run generate",
     "doc:site": "npm run build && npm run doc:gen && node ./scripts/build-site.mjs",
-    "lint:eslint:fix": "npm run lint:eslint -- --fix",
-    "lint:eslint": "eslint .",
-    "lint:fix": "npm run lint:prettier:fix && npm run lint:eslint:fix",
-    "lint:prettier:fix": "prettier --write .",
-    "lint:prettier": "prettier --check .",
-    "lint": "npm run lint:prettier && npm run lint:eslint",
+    "lint:fix": "oxfmt . && oxlint --type-aware --import-plugin --vitest-plugin --fix .",
+    "lint": "oxfmt --check . && oxlint --type-aware --import-plugin --vitest-plugin .",
     "t:watch": "vitest",
     "t": "npm test",
     "test:coverage": "vitest run --coverage",
@@ -71,22 +63,21 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build"
   },
-  "devDependencies": {
-    "@eslint/js": "^10.0.0",
-    "@types/node": "^22.19.20",
-    "@types/pako": "^2.0.4",
-    "@vitest/coverage-v8": "^4.1.0",
-    "esbuild": "^0.28.0",
-    "eslint": "^10.0.0",
-    "eslint-config-prettier": "^10.1.8",
-    "globals": "^17.6.0",
-    "prettier": "^3.8.3",
-    "typedoc": "^0.28.19",
-    "typescript": "~6.0",
-    "typescript-eslint": "^8.61.0",
-    "vitest": "^4.1.0"
-  },
   "dependencies": {
-    "pako": "^2.1.0"
-  }
+    "pako": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "esbuild": "^0.28.1",
+    "oxfmt": "^0.58.0",
+    "oxlint": "^1.73.0",
+    "oxlint-tsgolint": "^0.24.0",
+    "typescript": "~7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.11.0"
 }

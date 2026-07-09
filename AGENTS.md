@@ -79,7 +79,7 @@ cleverness — this is a parser; correctness and readability beat micro-optimiza
 npm run build     # type-declarations (tsc) + esbuild esm/cjs bundles into lib/
 npm test          # run the test suite (vitest)
 npm run typecheck # tsc --noEmit, also type-checks the tests
-npm run lint      # prettier --check + eslint
+npm run lint      # oxfmt --check + type-aware oxlint
 npm run lint:fix  # auto-fix formatting + lint
 ```
 
@@ -87,8 +87,8 @@ Always run `build`, `lint`, `typecheck`, and `test` before considering a change 
 
 ## Code style & conventions
 
-- TypeScript, `strict`. Formatting is owned by Prettier — never hand-format; run
-  `npm run lint:fix`. ESLint config is the source of truth for lint rules.
+- TypeScript, `strict`. Formatting is owned by oxfmt — never hand-format; run
+  `npm run lint:fix`. Oxlint config is the source of truth for lint rules.
 - Parsers read with `DataView`; use the **correct endianness** (ZIP integer fields are
   little-endian) and **unsigned** reads for sizes/offsets. Comment any non-obvious byte
   offset with the field it maps to.

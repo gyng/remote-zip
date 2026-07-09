@@ -1,0 +1,11 @@
+{
+  "name": "remote-zip-docs-toolchain",
+  "private": true,
+  "scripts": {
+    "generate": "typedoc ../../src/index.ts --excludePrivate --cleanOutputDir --logLevel Verbose --out ../../docs/api"
+  },
+  "devDependencies": {
+    "typedoc": "^0.28.20",
+    "typescript": "~6.0"
+  }
+}

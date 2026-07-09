@@ -1,11 +1,5 @@
 import { execFileSync } from "node:child_process";
-import {
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -16,10 +10,7 @@ try {
   const packageDir = join(temp, "node_modules", "@gyng", "remote-zip");
   mkdirSync(join(temp, "node_modules", "@gyng"), { recursive: true });
   symlinkSync(root, packageDir, "dir");
-  writeFileSync(
-    join(temp, "package.json"),
-    JSON.stringify({ private: true, type: "module" }),
-  );
+  writeFileSync(join(temp, "package.json"), JSON.stringify({ private: true, type: "module" }));
   writeFileSync(
     join(temp, "tsconfig.json"),
     JSON.stringify({
@@ -40,11 +31,10 @@ try {
       "const checksum: number = crc32(new Uint8Array());\n" +
       "void checksum;\n",
   );
-  execFileSync(
-    process.execPath,
-    [join(root, "node_modules", "typescript", "bin", "tsc")],
-    { cwd: temp, stdio: "inherit" },
-  );
+  execFileSync(process.execPath, [join(root, "node_modules", "typescript", "bin", "tsc")], {
+    cwd: temp,
+    stdio: "inherit",
+  });
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

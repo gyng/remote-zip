@@ -128,10 +128,7 @@ const aesKeyExpansion = (key: Uint8Array): AesKey => {
   return { w, rounds: Nr };
 };
 
-const aesEncryptBlock = (
-  { w, rounds }: AesKey,
-  input: Uint8Array,
-): Uint8Array => {
+const aesEncryptBlock = ({ w, rounds }: AesKey, input: Uint8Array): Uint8Array => {
   const s = input.slice(0, 16);
   const addRoundKey = (round: number) => {
     for (let c = 0; c < 16; c += 1) s[c] ^= w[round * 16 + c];
@@ -175,10 +172,8 @@ const aesEncryptBlock = (
 };
 
 /** Test seam: raw AES block encryption (FIPS-197), used to validate the core. */
-export const aesEncryptBlockRaw = (
-  key: Uint8Array,
-  block: Uint8Array,
-): Uint8Array => aesEncryptBlock(aesKeyExpansion(key), block);
+export const aesEncryptBlockRaw = (key: Uint8Array, block: Uint8Array): Uint8Array =>
+  aesEncryptBlock(aesKeyExpansion(key), block);
 
 /**
  * AES-CTR with WinZip's little-endian counter (starts at 1). Symmetric, so this
@@ -190,11 +185,7 @@ const aesCtrXor = (data: Uint8Array, key: Uint8Array): Uint8Array => {
   const counter = new Uint8Array(16);
   for (let off = 0, block = 1; off < data.length; off += 16, block += 1) {
     counter.fill(0);
-    for (
-      let v = block, i = 0;
-      v > 0 && i < 16;
-      v = Math.floor(v / 256), i += 1
-    ) {
+    for (let v = block, i = 0; v > 0 && i < 16; v = Math.floor(v / 256), i += 1) {
       counter[i] = v & 0xff;
     }
     const keystream = aesEncryptBlock(aesKey, counter);
@@ -283,7 +274,7 @@ export const parseAesExtra = (
   extra: ArrayBuffer,
 ): { strength: number; actualMethod: number } | null => {
   const view = new DataView(extra);
-  for (let p = 0; p + 4 <= extra.byteLength; ) {
+  for (let p = 0; p + 4 <= extra.byteLength;) {
     const id = view.getUint16(p, true);
     const size = view.getUint16(p + 2, true);
     const end = p + 4 + size;
@@ -302,8 +293,11 @@ export const parseAesExtra = (
 };
 
 /** Copy a (possibly subarray) view into a fresh ArrayBuffer for Web Crypto. */
-const toArrayBuffer = (u: Uint8Array): ArrayBuffer =>
-  u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer;
+const toArrayBuffer = (u: Uint8Array): ArrayBuffer => {
+  const copy = new Uint8Array(u.byteLength);
+  copy.set(u);
+  return copy.buffer;
+};
 
 const deriveAesKeys = async (
   password: Uint8Array,
@@ -311,13 +305,9 @@ const deriveAesKeys = async (
   keyLength: number,
 ): Promise<{ encKey: Uint8Array; authKey: Uint8Array; verify: Uint8Array }> => {
   const subtle = globalThis.crypto.subtle;
-  const baseKey = await subtle.importKey(
-    "raw",
-    toArrayBuffer(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
+  const baseKey = await subtle.importKey("raw", toArrayBuffer(password), "PBKDF2", false, [
+    "deriveBits",
+  ]);
   const derived = new Uint8Array(
     await subtle.deriveBits(
       {
@@ -337,10 +327,7 @@ const deriveAesKeys = async (
   };
 };
 
-const hmacSha1 = async (
-  key: Uint8Array,
-  message: Uint8Array,
-): Promise<Uint8Array> => {
+const hmacSha1 = async (key: Uint8Array, message: Uint8Array): Promise<Uint8Array> => {
   const subtle = globalThis.crypto.subtle;
   const hmacKey = await subtle.importKey(
     "raw",
@@ -349,9 +336,7 @@ const hmacSha1 = async (
     false,
     ["sign"],
   );
-  return new Uint8Array(
-    await subtle.sign("HMAC", hmacKey, toArrayBuffer(message)),
-  );
+  return new Uint8Array(await subtle.sign("HMAC", hmacKey, toArrayBuffer(message)));
 };
 
 /** Reasons a WinZip AES decryption can fail (mapped to RemoteZipError codes). */
@@ -383,11 +368,7 @@ export const decryptWinzipAes = async (
   const mac = data.subarray(data.length - 10);
   const ciphertext = data.subarray(saltLength + 2, data.length - 10);
 
-  const { encKey, authKey, verify } = await deriveAesKeys(
-    password,
-    salt,
-    keyLength,
-  );
+  const { encKey, authKey, verify } = await deriveAesKeys(password, salt, keyLength);
   if (verify[0] !== pwVerify[0] || verify[1] !== pwVerify[1]) {
     throw new CryptoError("WRONG_PASSWORD");
   }
@@ -410,11 +391,7 @@ export const encryptWinzipAes = async (
   salt: Uint8Array,
 ): Promise<Uint8Array> => {
   const { keyLength } = AES_PARAMS[strength];
-  const { encKey, authKey, verify } = await deriveAesKeys(
-    password,
-    salt,
-    keyLength,
-  );
+  const { encKey, authKey, verify } = await deriveAesKeys(password, salt, keyLength);
   const ciphertext = aesCtrXor(plaintext, encKey);
   const mac = (await hmacSha1(authKey, ciphertext)).subarray(0, 10);
   const out = new Uint8Array(salt.length + 2 + ciphertext.length + 10);

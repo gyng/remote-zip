@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "rules": {
+    "eslint/no-unmodified-loop-condition": "off",
+    "eslint/no-useless-constructor": "off",
+    "typescript/no-misused-spread": "off",
+    "typescript/no-unsafe-type-assertion": "off",
+    "unicorn/consistent-function-scoping": "off",
+    "vitest/expect-expect": "off",
+    "vitest/require-to-throw-message": "off"
+  }
+}

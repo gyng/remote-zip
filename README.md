@@ -126,7 +126,7 @@ Requires Node >= 22.
 npm ci            # install (reproducible, honours .npmrc cooldown)
 npm run d         # watch and build
 npm run t:watch   # watch and test
-npm run lint      # prettier + eslint
+npm run lint      # oxfmt + type-aware oxlint
 npm run typecheck # tsc --noEmit (also checks tests)
 npm run build     # type declarations + esm/cjs bundles
 npm test          # run the test suite once

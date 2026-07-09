@@ -17,18 +17,12 @@ describe("AES core (FIPS-197 known-answer tests)", () => {
 
   it("encrypts a block with AES-128", () => {
     const key = fromHex("000102030405060708090a0b0c0d0e0f");
-    expect(toHex(aesEncryptBlockRaw(key, pt))).toBe(
-      "69c4e0d86a7b0430d8cdb78070b4c55a",
-    );
+    expect(toHex(aesEncryptBlockRaw(key, pt))).toBe("69c4e0d86a7b0430d8cdb78070b4c55a");
   });
 
   it("encrypts a block with AES-256", () => {
-    const key = fromHex(
-      "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-    );
-    expect(toHex(aesEncryptBlockRaw(key, pt))).toBe(
-      "8ea2b7ca516745bfeafc49904b496089",
-    );
+    const key = fromHex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    expect(toHex(aesEncryptBlockRaw(key, pt))).toBe("8ea2b7ca516745bfeafc49904b496089");
   });
 });
 
@@ -79,9 +73,9 @@ describe("decryptWinzipAes failure modes", () => {
   const plaintext = new TextEncoder().encode("payload");
 
   it("rejects an unsupported key strength", async () => {
-    await expect(
-      decryptWinzipAes(new Uint8Array(40), password, 4),
-    ).rejects.toMatchObject({ reason: "UNSUPPORTED" });
+    await expect(decryptWinzipAes(new Uint8Array(40), password, 4)).rejects.toMatchObject({
+      reason: "UNSUPPORTED",
+    });
   });
 
   it("rejects a tampered ciphertext (bad MAC, right password)", async () => {
@@ -94,8 +88,8 @@ describe("decryptWinzipAes failure modes", () => {
   });
 
   it("rejects a truncated payload", async () => {
-    await expect(
-      decryptWinzipAes(new Uint8Array(10), password, 3),
-    ).rejects.toMatchObject({ reason: "BAD_MAC" });
+    await expect(decryptWinzipAes(new Uint8Array(10), password, 3)).rejects.toMatchObject({
+      reason: "BAD_MAC",
+    });
   });
 });

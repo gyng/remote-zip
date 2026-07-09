@@ -16,6 +16,4 @@ if (existsSync("lib/esm/index.mjs.map")) {
   copyFileSync("lib/esm/index.mjs.map", "docs/index.mjs.map");
 }
 
-console.log(
-  "site assembled in docs/ (index.html, sample.zip, remote-zip.mjs, api/)",
-);
+console.log("site assembled in docs/ (index.html, sample.zip, remote-zip.mjs, api/)");

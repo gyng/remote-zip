@@ -29,6 +29,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Install isolated TypeDoc toolchain
+        run: npm ci --prefix tools/typedoc
+
       - name: Build the site (landing page + demo + API docs under /api)
         run: npm run doc:site
 

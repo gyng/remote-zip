@@ -10,6 +10,7 @@
     "moduleResolution": "bundler",
     "skipLibCheck": true,
     "types": ["node"],
+    "rootDir": "src",
     "outDir": "lib"
   },
   "include": ["src/**/*"]

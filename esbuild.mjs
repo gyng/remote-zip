@@ -17,10 +17,7 @@ function emitEsmTypes(dir = "lib/types") {
   // node16/nodenext resolution, and every referenced declaration needs a twin.
   const index = withEsmExtensions(readFileSync(`${dir}/index.d.ts`, "utf8"));
   writeFileSync(`${dir}/index.d.mts`, index);
-  writeFileSync(
-    `${dir}/zip.d.mts`,
-    withEsmExtensions(readFileSync(`${dir}/zip.d.ts`, "utf8")),
-  );
+  writeFileSync(`${dir}/zip.d.mts`, withEsmExtensions(readFileSync(`${dir}/zip.d.ts`, "utf8")));
   writeFileSync(
     `${dir}/crypto.d.mts`,
     withEsmExtensions(readFileSync(`${dir}/crypto.d.ts`, "utf8")),
@@ -60,10 +57,7 @@ const watch = process.env["WATCH"] === "1";
 
 try {
   if (watch) {
-    const contexts = await Promise.all([
-      esbuild.context(esmOptions),
-      esbuild.context(cjsOptions),
-    ]);
+    const contexts = await Promise.all([esbuild.context(esmOptions), esbuild.context(cjsOptions)]);
     await Promise.all(contexts.map((ctx) => ctx.watch()));
     console.log("esbuild is watching...");
   } else {
