@@ -1,6 +1,6 @@
 {
   "name": "@gyng/remote-zip",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Fetch file listings and individual files from a remote ZIP archive over HTTP Range requests, without downloading the whole archive.",
   "keywords": [
     "browser",
