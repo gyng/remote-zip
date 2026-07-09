@@ -4,6 +4,7 @@ name: Publish
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,10 +43,10 @@ jobs:
         with:
           subject-path: "lib/**/*"
 
-      # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node LTS still ships npm 10.x.
-      # --min-release-age=0 overrides the repo .npmrc cooldown for this self-upgrade only.
-      - name: Upgrade npm for Trusted Publishing
-        run: npm install -g npm@latest --min-release-age=0
+      # Trusted Publishing (OIDC) needs npm >= 11.5.1. Pin the CLI so publishing
+      # cannot break when a new npm major is released with incompatible packaging.
+      - name: Install npm for Trusted Publishing
+        run: npm install -g npm@11.11.0 --min-release-age=0
 
       # No NPM_TOKEN: npm exchanges the GitHub OIDC token for a short-lived
       # publish token via the Trusted Publisher configured on npmjs.com.
