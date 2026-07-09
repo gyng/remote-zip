@@ -11,14 +11,20 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
  */
 function emitEsmTypes(dir = "lib/types") {
   if (!existsSync(`${dir}/index.d.ts`)) return;
-  // The barrel re-exports "./zip"; under nodenext ESM the specifier needs an
-  // explicit extension.
-  const index = readFileSync(`${dir}/index.d.ts`, "utf8").replace(
-    /(from\s+["'])\.\/zip(["'])/g,
-    "$1./zip.mjs$2",
-  );
+  const withEsmExtensions = (source) =>
+    source.replace(/(from\s+["'])\.\/(zip|crypto)(["'])/g, "$1./$2.mjs$3");
+  // Relative references from .d.mts files need explicit ESM extensions under
+  // node16/nodenext resolution, and every referenced declaration needs a twin.
+  const index = withEsmExtensions(readFileSync(`${dir}/index.d.ts`, "utf8"));
   writeFileSync(`${dir}/index.d.mts`, index);
-  writeFileSync(`${dir}/zip.d.mts`, readFileSync(`${dir}/zip.d.ts`, "utf8"));
+  writeFileSync(
+    `${dir}/zip.d.mts`,
+    withEsmExtensions(readFileSync(`${dir}/zip.d.ts`, "utf8")),
+  );
+  writeFileSync(
+    `${dir}/crypto.d.mts`,
+    withEsmExtensions(readFileSync(`${dir}/crypto.d.ts`, "utf8")),
+  );
 }
 
 /** Options shared by both output formats. */

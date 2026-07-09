@@ -67,6 +67,11 @@ describe("parseAesExtra", () => {
     const buf = new Uint8Array([0x01, 0x00, 0x02, 0x00, 0xaa, 0xbb]);
     expect(parseAesExtra(buf.buffer)).toBeNull();
   });
+
+  it("returns null for truncated or undersized AES extra fields", () => {
+    expect(parseAesExtra(new Uint8Array([1, 153, 7, 0]).buffer)).toBeNull();
+    expect(parseAesExtra(new Uint8Array([1, 153, 1, 0, 0]).buffer)).toBeNull();
+  });
 });
 
 describe("decryptWinzipAes failure modes", () => {
@@ -86,5 +91,11 @@ describe("decryptWinzipAes failure modes", () => {
     await expect(decryptWinzipAes(blob, password, 3)).rejects.toMatchObject({
       reason: "BAD_MAC",
     });
+  });
+
+  it("rejects a truncated payload", async () => {
+    await expect(
+      decryptWinzipAes(new Uint8Array(10), password, 3),
+    ).rejects.toMatchObject({ reason: "BAD_MAC" });
   });
 });

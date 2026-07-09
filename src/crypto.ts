@@ -286,14 +286,17 @@ export const parseAesExtra = (
   for (let p = 0; p + 4 <= extra.byteLength; ) {
     const id = view.getUint16(p, true);
     const size = view.getUint16(p + 2, true);
+    const end = p + 4 + size;
+    if (end > extra.byteLength) return null;
     if (id === 0x9901) {
+      if (size < 7) return null;
       // data: version(2) + vendor "AE"(2) + strength(1) + actualMethod(2)
       return {
         strength: view.getUint8(p + 4 + 4),
         actualMethod: view.getUint16(p + 4 + 5, true),
       };
     }
-    p = p + 4 + size;
+    p = end;
   }
   return null;
 };
@@ -373,6 +376,7 @@ export const decryptWinzipAes = async (
   const params = AES_PARAMS[strength];
   if (!params) throw new CryptoError("UNSUPPORTED");
   const { saltLength, keyLength } = params;
+  if (data.length < saltLength + 12) throw new CryptoError("BAD_MAC");
 
   const salt = data.subarray(0, saltLength);
   const pwVerify = data.subarray(saltLength, saltLength + 2);

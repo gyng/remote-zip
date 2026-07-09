@@ -14,10 +14,9 @@ untrusted** origin. Treat everything the archive tells you as attacker-controlle
 - **Decompression**: a small compressed entry can inflate to a very large output (a "zip
   bomb"). `RemoteZip.fetch` accepts a `maxUncompressedSize` cap; set it when handling
   untrusted archives to bound memory use.
-- **Header fields** (sizes, offsets, lengths, comments): the central-directory offset and
-  size are bounds-checked against the archive length (including resolved ZIP64 values).
-  Per-entry local-header offsets are not yet fully validated, so still set sane limits at
-  the call site (e.g. `maxUncompressedSize`).
+- **Header fields** (sizes, offsets, lengths, comments): central-directory and per-entry
+  offsets, sizes, variable-length fields, and HTTP Range responses are checked against
+  the archive length before reads or allocations.
 - **Entry names**: filenames are returned verbatim and may contain path-traversal
   sequences (`../`) or absolute paths. This library never writes to disk — if **you**
   extract entries to the filesystem, normalize and contain the paths yourself.

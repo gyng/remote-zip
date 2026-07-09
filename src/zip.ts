@@ -29,13 +29,20 @@ const ZIP64_U16_SENTINEL = 0xffff;
 export type RemoteZipErrorCode =
   | "UNKNOWN"
   | "CONTENT_LENGTH_MISSING"
+  | "INVALID_CONTENT_LENGTH"
   | "HTTP_ERROR"
+  | "RANGE_NOT_SUPPORTED"
+  | "RANGE_RESPONSE_MISMATCH"
   | "EOCD_NOT_FOUND"
   | "UNSUPPORTED_ZIP64"
   | "UNSUPPORTED_ENCRYPTION"
   | "FILE_NOT_FOUND"
   | "LOCAL_HEADER_PARSE_FAILED"
   | "CENTRAL_DIRECTORY_OUT_OF_BOUNDS"
+  | "INVALID_ARCHIVE"
+  | "TRUNCATED_ENTRY"
+  | "UNSUPPORTED_COMPRESSION"
+  | "UNSUPPORTED_MULTI_DISK"
   | "DECOMPRESSION_LIMIT_EXCEEDED"
   | "CRC_MISMATCH"
   | "WRONG_PASSWORD"
@@ -86,10 +93,51 @@ const mapCryptoError = (err: CryptoError): RemoteZipError => {
 
 /** Throw a typed HTTP error for a non-success response. */
 const assertResponseOk = (status: number, url: URL): void => {
-  if (status < 200 || status >= 400) {
+  if (status < 200 || status >= 300) {
     throw new RemoteZipError(
       `Could not fetch remote ZIP at ${url}: HTTP status ${status}`,
       "HTTP_ERROR",
+    );
+  }
+};
+
+/** Validate that a server honoured an inclusive byte-range request exactly. */
+const assertRangeResponse = (
+  response: Response,
+  url: URL,
+  expectedStart: number,
+  expectedEnd: number,
+  expectedTotal: number,
+  shortResponseCode: RemoteZipErrorCode = "RANGE_RESPONSE_MISMATCH",
+): void => {
+  assertResponseOk(response.status, url);
+  if (response.status !== 206) {
+    throw new RemoteZipError(
+      `Server did not honour Range request for ${url}: HTTP status ${response.status}`,
+      "RANGE_NOT_SUPPORTED",
+    );
+  }
+  const raw = response.headers.get("content-range");
+  const match = raw?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+  if (!match) {
+    throw new RemoteZipError(
+      `Invalid or missing Content-Range from ${url}: ${raw ?? "missing"}`,
+      "RANGE_RESPONSE_MISMATCH",
+    );
+  }
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (start !== expectedStart || total !== expectedTotal) {
+    throw new RemoteZipError(
+      `Unexpected Content-Range from ${url}: ${raw}`,
+      "RANGE_RESPONSE_MISMATCH",
+    );
+  }
+  if (end !== expectedEnd) {
+    throw new RemoteZipError(
+      `Truncated Range response from ${url}: expected ${expectedStart}-${expectedEnd}, got ${raw}`,
+      end < expectedEnd ? shortResponseCode : "RANGE_RESPONSE_MISMATCH",
     );
   }
 };
@@ -465,6 +513,7 @@ export class RemoteZip {
         "LOCAL_HEADER_PARSE_FAILED",
       );
     }
+    assertLocalHeaderMatches(file, localFile);
     return this.decodeEntry(
       file,
       new Uint8Array(localFile.meta.compressedData),
@@ -617,6 +666,8 @@ export class RemoteZip {
     const entries = streamLocalFile(reader, {
       compressedSize: file.data.compressedSize,
       compressionMethod: file.data.compressionMethod,
+      expectedFilename: file.data.filename,
+      expectedFlags: file.data.generalPurposeBitFlag,
       maxBytes: options?.maxUncompressedSize,
       expectedCrc: options?.verifyCrc ? file.data.crc32 : undefined,
     });
@@ -665,34 +716,128 @@ export class RemoteZip {
       );
     }
 
-    const headers = new Headers(additionalHeaders);
-    // Local file headers have variable length due to filename/path.
-    // To avoid making an additional Range query, we fetch extra bytes for the header.
-    // 256: path
-    // 32: extra field
-    // 30: other header fields
-    // 100: generous buffer
-    const MAX_LOCAL_FILE_HEADER_SIZE = 256 + 32 + 30 + 100;
-    headers.append(
-      "Range",
-      `bytes=${file.data.localFileHeaderRelativeOffset}-${
-        file.data.localFileHeaderRelativeOffset +
-        file.data.compressedSize +
-        MAX_LOCAL_FILE_HEADER_SIZE
-      }`,
-    );
+    assertSupportedCompression(file);
+    const start = file.data.localFileHeaderRelativeOffset;
+    if (start + 30 > this.contentLength) {
+      throw new RemoteZipError(
+        `Local file header is out of bounds for ${file.data.filename}`,
+        "INVALID_ARCHIVE",
+      );
+    }
 
-    const response = await fetch(
-      this.url.toString(),
-      this.requestInitFor(this.method, headers, {
-        signal: options?.signal,
-        timeoutMs: options?.timeoutMs,
-      }),
+    // Read the fixed portion first. The two variable-length fields can each be
+    // 65,535 bytes, so no fixed speculative allowance is sufficient.
+    const probe = await this.fetchRange(
+      start,
+      start + 29,
+      additionalHeaders,
+      options,
+      "LOCAL_HEADER_PARSE_FAILED",
     );
-    assertResponseOk(response.status, this.url);
+    const probeBytes = await probe.arrayBuffer();
+    const view = new DataView(probeBytes);
+    if (view.getUint32(0) !== SIG_LOCAL_FILE_HEADER) {
+      throw new RemoteZipError(
+        "cannot parse local file header in remote ZIP",
+        "LOCAL_HEADER_PARSE_FAILED",
+      );
+    }
+    const localFlags = view.getUint16(6, true);
+    const localMethod = view.getUint16(8, true);
+    if (
+      localFlags !== file.data.generalPurposeBitFlag ||
+      localMethod !== file.data.compressionMethod
+    ) {
+      throw new RemoteZipError(
+        `Local header disagrees with central directory for ${file.data.filename}`,
+        "INVALID_ARCHIVE",
+      );
+    }
+    const headerLength =
+      30 + view.getUint16(26, true) + view.getUint16(28, true);
+    const endExclusive = start + headerLength + file.data.compressedSize;
+    if (endExclusive > this.contentLength) {
+      throw new RemoteZipError(
+        `Entry data is out of bounds for ${file.data.filename}`,
+        "INVALID_ARCHIVE",
+      );
+    }
+    const response = await this.fetchRange(
+      start,
+      endExclusive - 1,
+      additionalHeaders,
+      options,
+      "TRUNCATED_ENTRY",
+    );
     return { file, response };
   }
+
+  private async fetchRange(
+    start: number,
+    end: number,
+    additionalHeaders?: Headers,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+    shortResponseCode?: RemoteZipErrorCode,
+  ): Promise<Response> {
+    const headers = new Headers(additionalHeaders);
+    headers.set("Range", `bytes=${start}-${end}`);
+    const response = await fetch(
+      this.url.toString(),
+      this.requestInitFor(this.method, headers, options),
+    );
+    assertRangeResponse(
+      response,
+      this.url,
+      start,
+      end,
+      this.contentLength,
+      shortResponseCode,
+    );
+    return response;
+  }
 }
+
+const assertSupportedCompression = (file: CentralDirectoryRecord): void => {
+  const { compressionMethod: method, generalPurposeBitFlag: flags } = file.data;
+  if (method === 99) {
+    const aes = parseAesExtra(file.data.extraField);
+    if (!(flags & 0x1) || !aes) {
+      throw new RemoteZipError(
+        `Invalid WinZip AES metadata for ${file.data.filename}`,
+        "INVALID_ARCHIVE",
+      );
+    }
+    if (aes.actualMethod !== 0 && aes.actualMethod !== 8) {
+      throw new RemoteZipError(
+        `Unsupported compression method ${aes.actualMethod} for ${file.data.filename}`,
+        "UNSUPPORTED_COMPRESSION",
+      );
+    }
+    return;
+  }
+  if (method !== 0 && method !== 8) {
+    throw new RemoteZipError(
+      `Unsupported compression method ${method} for ${file.data.filename}`,
+      "UNSUPPORTED_COMPRESSION",
+    );
+  }
+};
+
+const assertLocalHeaderMatches = (
+  file: CentralDirectoryRecord,
+  local: LocalFileHeader,
+): void => {
+  if (
+    local.data.filename !== file.data.filename ||
+    local.data.generalPurposeBitFlag !== file.data.generalPurposeBitFlag ||
+    local.data.compressionMethod !== file.data.compressionMethod
+  ) {
+    throw new RemoteZipError(
+      `Local header disagrees with central directory for ${file.data.filename}`,
+      "INVALID_ARCHIVE",
+    );
+  }
+};
 
 /**
  * Raw-inflates `data`, aborting with a {@link RemoteZipError} if the decompressed
@@ -765,11 +910,20 @@ async function* streamLocalFile(
   options: {
     compressedSize: number;
     compressionMethod: number;
+    expectedFilename: string;
+    expectedFlags: number;
     maxBytes?: number;
     expectedCrc?: number;
   },
 ): AsyncGenerator<Uint8Array> {
-  const { compressedSize, compressionMethod, maxBytes, expectedCrc } = options;
+  const {
+    compressedSize,
+    compressionMethod,
+    expectedFilename,
+    expectedFlags,
+    maxBytes,
+    expectedCrc,
+  } = options;
   const crc = expectedCrc !== undefined ? new Crc32() : undefined;
   let buf = new Uint8Array(0);
   const append = (chunk: Uint8Array) => {
@@ -803,6 +957,21 @@ async function* streamLocalFile(
   }
   const headerLen = 30 + dv.getUint16(26, true) + dv.getUint16(28, true);
   await readUntil(headerLen);
+  const filenameLength = dv.getUint16(26, true);
+  const localFilename = decodeZipString(
+    buf.buffer.slice(buf.byteOffset + 30, buf.byteOffset + 30 + filenameLength),
+    isUtf8Flag(expectedFlags),
+  );
+  if (
+    dv.getUint16(6, true) !== expectedFlags ||
+    dv.getUint16(8, true) !== compressionMethod ||
+    localFilename !== expectedFilename
+  ) {
+    throw new RemoteZipError(
+      `Local header disagrees with central directory for ${expectedFilename}`,
+      "INVALID_ARCHIVE",
+    );
+  }
 
   // 2. Output pipeline: passthrough for stored, streaming raw inflate otherwise,
   //    with a mid-stream size cap (the decompression-bomb guard).
@@ -827,6 +996,7 @@ async function* streamLocalFile(
 
   let remaining = compressedSize;
   const feed = (chunk: Uint8Array) => {
+    /* v8 ignore next -- a validated exact Range cannot contain bytes past the entry */
     const piece =
       chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
     remaining -= piece.length;
@@ -852,6 +1022,13 @@ async function* streamLocalFile(
     if (done) break;
     feed(value);
     yield* queue.splice(0);
+  }
+
+  if (remaining !== 0) {
+    throw new RemoteZipError(
+      `Truncated compressed data for ${expectedFilename}`,
+      "TRUNCATED_ENTRY",
+    );
   }
 
   if (crc && crc.digest() !== expectedCrc) {
@@ -1020,14 +1197,29 @@ export class RemoteZipPointer {
         "CONTENT_LENGTH_MISSING",
       );
     }
-    const contentLength = Number.parseInt(contentLengthRaw, 10);
-    const { eocd, cdOffset, cdSize } = await this.fetchEndOfCentralDirectory(
-      contentLength,
-      this.additionalHeaders,
-    );
+    if (!/^\d+$/.test(contentLengthRaw)) {
+      throw new RemoteZipError(
+        `Invalid Content-Length: ${contentLengthRaw}`,
+        "INVALID_CONTENT_LENGTH",
+      );
+    }
+    const contentLength = Number(contentLengthRaw);
+    if (!Number.isSafeInteger(contentLength) || contentLength < 22) {
+      throw new RemoteZipError(
+        `Invalid Content-Length: ${contentLengthRaw}`,
+        "INVALID_CONTENT_LENGTH",
+      );
+    }
+    const { eocd, cdOffset, cdSize, cdCount } =
+      await this.fetchEndOfCentralDirectory(
+        contentLength,
+        this.additionalHeaders,
+      );
     const centralDirectoryRecords = await this.fetchCentralDirectoryRecords(
       cdOffset,
       cdSize,
+      cdCount,
+      contentLength,
       this.additionalHeaders,
     );
 
@@ -1052,6 +1244,7 @@ export class RemoteZipPointer {
     eocd: EndOfCentralDirectory;
     cdOffset: number;
     cdSize: number;
+    cdCount: number;
   }> {
     // The EOCD is 22 bytes plus an optional comment of up to 65535 bytes,
     // optionally preceded by a 20-byte ZIP64 locator. Try a small trailing
@@ -1063,18 +1256,39 @@ export class RemoteZipPointer {
     for (const window of windows) {
       const offset = Math.max(0, zipByteLength - window);
       const eocdHeaders = new Headers(additionalHeaders);
-      eocdHeaders.append("Range", `bytes=${offset}-${zipByteLength}`);
+      eocdHeaders.set("Range", `bytes=${offset}-${zipByteLength - 1}`);
       const eocdRes = await fetch(
         this.url.toString(),
         this.requestInitFor(this.method, eocdHeaders),
       );
-      assertResponseOk(eocdRes.status, this.url);
+      assertRangeResponse(
+        eocdRes,
+        this.url,
+        offset,
+        zipByteLength - 1,
+        zipByteLength,
+      );
 
       const buffer = await eocdRes.arrayBuffer();
       const eocd = parseOneEOCD(buffer);
       if (eocd) {
         let cdOffset = eocd.data.centralDirectoryByteOffset;
         let cdSize = eocd.data.centralDirectoryByteSize;
+        let cdCount = eocd.data.centralDirectoryRecordCount;
+
+        if (
+          (eocd.data.diskNumber !== 0 &&
+            eocd.data.diskNumber !== ZIP64_U16_SENTINEL) ||
+          (eocd.data.cdDisk !== 0 && eocd.data.cdDisk !== ZIP64_U16_SENTINEL) ||
+          (eocd.data.centralDirectoryDiskNumber !== cdCount &&
+            eocd.data.centralDirectoryDiskNumber !== ZIP64_U16_SENTINEL &&
+            cdCount !== ZIP64_U16_SENTINEL)
+        ) {
+          throw new RemoteZipError(
+            "Multi-disk ZIP archives are not supported",
+            "UNSUPPORTED_MULTI_DISK",
+          );
+        }
 
         // ZIP64: the real CD offset/size live in the ZIP64 EOCD record, located
         // via the ZIP64 EOCD locator (the 20 bytes preceding the EOCD).
@@ -1092,24 +1306,43 @@ export class RemoteZipPointer {
               "UNSUPPORTED_ZIP64",
             );
           }
+          if (locator.diskWithZip64EOCD !== 0 || locator.totalDisks !== 1) {
+            throw new RemoteZipError(
+              "Multi-disk ZIP archives are not supported",
+              "UNSUPPORTED_MULTI_DISK",
+            );
+          }
           const z64 = await this.fetchZip64EOCD(
             locator.zip64EOCDOffset,
+            zipByteLength,
             additionalHeaders,
           );
+          if (
+            z64.diskNumber !== 0 ||
+            z64.cdDisk !== 0 ||
+            z64.centralDirectoryDiskRecordCount !==
+              z64.centralDirectoryRecordCount
+          ) {
+            throw new RemoteZipError(
+              "Multi-disk ZIP archives are not supported",
+              "UNSUPPORTED_MULTI_DISK",
+            );
+          }
           cdOffset = z64.centralDirectoryByteOffset;
           cdSize = z64.centralDirectoryByteSize;
+          cdCount = z64.centralDirectoryRecordCount;
         }
 
         // The central directory must lie within the archive. Reject out-of-bounds
         // offsets/sizes before we use them to build a Range request.
-        if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > zipByteLength) {
+        if (cdOffset + cdSize > zipByteLength) {
           throw new RemoteZipError(
             `Central directory is out of bounds (offset ${cdOffset}, size ${cdSize}, archive ${zipByteLength} bytes)`,
             "CENTRAL_DIRECTORY_OUT_OF_BOUNDS",
           );
         }
 
-        return { eocd, cdOffset, cdSize };
+        return { eocd, cdOffset, cdSize, cdCount };
       }
 
       // Not found in this window. If we already fetched from the start of the
@@ -1125,16 +1358,23 @@ export class RemoteZipPointer {
 
   private async fetchZip64EOCD(
     offset: number,
+    zipByteLength: number,
     additionalHeaders?: Headers,
   ): Promise<Zip64EndOfCentralDirectory> {
+    if (offset + 56 > zipByteLength) {
+      throw new RemoteZipError(
+        "ZIP64 EOCD offset is out of bounds",
+        "INVALID_ARCHIVE",
+      );
+    }
     const headers = new Headers(additionalHeaders);
     // The fixed part of the ZIP64 EOCD record is 56 bytes.
-    headers.append("Range", `bytes=${offset}-${offset + 56}`);
+    headers.set("Range", `bytes=${offset}-${offset + 55}`);
     const res = await fetch(
       this.url.toString(),
       this.requestInitFor(this.method, headers),
     );
-    assertResponseOk(res.status, this.url);
+    assertRangeResponse(res, this.url, offset, offset + 55, zipByteLength);
     const z64 = parseZip64EOCD(await res.arrayBuffer());
     if (!z64) {
       throw new RemoteZipError(
@@ -1148,17 +1388,47 @@ export class RemoteZipPointer {
   private async fetchCentralDirectoryRecords(
     cdOffset: number,
     cdSize: number,
+    cdCount: number,
+    zipByteLength: number,
     additionalHeaders?: Headers,
   ): Promise<CentralDirectoryRecord[]> {
+    if (cdSize === 0) {
+      if (cdCount !== 0) {
+        throw new RemoteZipError(
+          "Central directory record count does not match its size",
+          "INVALID_ARCHIVE",
+        );
+      }
+      return [];
+    }
     const cdHeaders = new Headers(additionalHeaders);
-    cdHeaders.append("Range", `bytes=${cdOffset}-${cdOffset + cdSize}`);
+    cdHeaders.set("Range", `bytes=${cdOffset}-${cdOffset + cdSize - 1}`);
     const cdRes = await fetch(
       this.url.toString(),
       this.requestInitFor(this.method, cdHeaders),
     );
-    assertResponseOk(cdRes.status, this.url);
+    assertRangeResponse(
+      cdRes,
+      this.url,
+      cdOffset,
+      cdOffset + cdSize - 1,
+      zipByteLength,
+    );
     const cdBuffer = await cdRes.arrayBuffer();
-    return parseAllCDs(cdBuffer);
+    const records = parseAllCDs(cdBuffer);
+    if (records.length !== cdCount) {
+      throw new RemoteZipError(
+        `Central directory contains ${records.length} records; expected ${cdCount}`,
+        "INVALID_ARCHIVE",
+      );
+    }
+    if (records.some((record) => record.data.startingDiskNumber !== 0)) {
+      throw new RemoteZipError(
+        "Multi-disk ZIP archives are not supported",
+        "UNSUPPORTED_MULTI_DISK",
+      );
+    }
+    return records;
   }
 }
 
@@ -1210,6 +1480,9 @@ export const isZip64 = (eocd: EndOfCentralDirectory): boolean =>
 
 /** Effective central-directory location from a ZIP64 End Of Central Directory record. */
 export interface Zip64EndOfCentralDirectory {
+  diskNumber: number;
+  cdDisk: number;
+  centralDirectoryDiskRecordCount: number;
   centralDirectoryRecordCount: number;
   centralDirectoryByteSize: number;
   centralDirectoryByteOffset: number;
@@ -1254,6 +1527,10 @@ const parseZip64Extra = (
     const headerId = view.getUint16(p, true);
     const size = view.getUint16(p + 2, true);
     const dataStart = p + 4;
+    const dataEnd = dataStart + size;
+    if (dataEnd > extra.byteLength) {
+      throw new RemoteZipError("Truncated ZIP extra field", "INVALID_ARCHIVE");
+    }
     if (headerId === 0x0001) {
       const result: {
         uncompressedSize?: number;
@@ -1262,6 +1539,17 @@ const parseZip64Extra = (
         diskStart?: number;
       } = {};
       let q = dataStart;
+      const required =
+        (need.uncompressed ? 8 : 0) +
+        (need.compressed ? 8 : 0) +
+        (need.offset ? 8 : 0) +
+        (need.disk ? 4 : 0);
+      if (size < required) {
+        throw new RemoteZipError(
+          "ZIP64 extra field is missing required values",
+          "INVALID_ARCHIVE",
+        );
+      }
       if (need.uncompressed) {
         result.uncompressedSize = readUint64(view, q);
         q += 8;
@@ -1279,19 +1567,30 @@ const parseZip64Extra = (
       }
       return result;
     }
-    p = dataStart + size;
+    p = dataEnd;
   }
-  return {};
+  throw new RemoteZipError(
+    "ZIP64 sentinel has no ZIP64 extra field",
+    "INVALID_ARCHIVE",
+  );
 };
 
 /** Locate the ZIP64 EOCD locator in a tail buffer and return the ZIP64 EOCD offset. */
 export const parseZip64EOCDLocator = (
   buffer: ArrayBuffer,
-): { zip64EOCDOffset: number } | null => {
+): {
+  diskWithZip64EOCD: number;
+  zip64EOCDOffset: number;
+  totalDisks: number;
+} | null => {
   const view = new DataView(buffer);
   for (let i = buffer.byteLength - 20; i >= 0; i -= 1) {
     if (view.getUint32(i) === SIG_ZIP64_EOCD_LOCATOR) {
-      return { zip64EOCDOffset: readUint64(view, i + 8) };
+      return {
+        diskWithZip64EOCD: view.getUint32(i + 4, true),
+        zip64EOCDOffset: readUint64(view, i + 8),
+        totalDisks: view.getUint32(i + 16, true),
+      };
     }
   }
   return null;
@@ -1305,6 +1604,9 @@ export const parseZip64EOCD = (
   for (let i = 0; i <= buffer.byteLength - 56; i += 1) {
     if (view.getUint32(i) === SIG_ZIP64_EOCD) {
       return {
+        diskNumber: view.getUint32(i + 16, true),
+        cdDisk: view.getUint32(i + 20, true),
+        centralDirectoryDiskRecordCount: readUint64(view, i + 24),
         centralDirectoryRecordCount: readUint64(view, i + 32),
         centralDirectoryByteSize: readUint64(view, i + 40),
         centralDirectoryByteOffset: readUint64(view, i + 48),
@@ -1350,18 +1652,31 @@ export const parseAllCDs = (buffer: ArrayBuffer): CentralDirectoryRecord[] => {
   const cds: CentralDirectoryRecord[] = [];
   const view = new DataView(buffer);
 
-  // Need >= 4 bytes to check for signature
-  for (let i = 0; i <= buffer.byteLength - 4; i += 1) {
-    if (view.getUint32(i) === SIG_CD) {
-      const cd = parseOneCD(buffer.slice(i));
-      if (cd) {
-        cds.push(cd);
-        i += cd.meta.length - 1;
-        continue;
-      }
-    } else if (view.getUint32(i) === SIG_EOCD) {
-      break;
+  let offset = 0;
+  while (offset + 4 <= buffer.byteLength) {
+    const signature = view.getUint32(offset);
+    if (signature === SIG_EOCD) break;
+    if (signature !== SIG_CD) {
+      throw new RemoteZipError(
+        `Unexpected data in central directory at offset ${offset}`,
+        "INVALID_ARCHIVE",
+      );
     }
+    const cd = parseOneCD(buffer.slice(offset));
+    if (!cd) {
+      throw new RemoteZipError(
+        `Truncated central directory record at offset ${offset}`,
+        "INVALID_ARCHIVE",
+      );
+    }
+    cds.push(cd);
+    offset += cd.meta.length;
+  }
+  if (
+    offset !== buffer.byteLength &&
+    (offset + 4 > buffer.byteLength || view.getUint32(offset) !== SIG_EOCD)
+  ) {
+    throw new RemoteZipError("Truncated central directory", "INVALID_ARCHIVE");
   }
 
   return cds;
@@ -1375,11 +1690,19 @@ export const parseOneCD = (
   const view = new DataView(buffer);
 
   // Seek to start of central directory
-  for (let i = 0; i < buffer.byteLength - MIN_CD_LENGTH; i += 1) {
+  for (let i = 0; i <= buffer.byteLength - MIN_CD_LENGTH; i += 1) {
     if (view.getInt32(i) === SIG_CD) {
       const filenameLength = view.getUint16(i + 28, true); // n
       const extraFieldLength = view.getUint16(i + 30, true); // m
       const fileCommentLength = view.getUint16(i + 32, true); // k
+      const recordLength =
+        46 + filenameLength + extraFieldLength + fileCommentLength;
+      if (i + recordLength > buffer.byteLength) {
+        throw new RemoteZipError(
+          "Truncated central directory record",
+          "INVALID_ARCHIVE",
+        );
+      }
 
       const rawCompressedSize = view.getUint32(i + 20, true);
       const rawUncompressedSize = view.getUint32(i + 24, true);
@@ -1406,7 +1729,7 @@ export const parseOneCD = (
 
       return {
         meta: {
-          length: 46 + filenameLength + extraFieldLength + fileCommentLength,
+          length: recordLength,
         },
         data: {
           signature: buffer.slice(i, i + 4),
@@ -1460,6 +1783,9 @@ export const parseOneEOCD = (
   for (let i = buffer.byteLength - MIN_EOCD_LENGTH; i >= 0; i -= 1) {
     if (view.getUint32(i) === SIG_EOCD) {
       const commentLength = view.getUint16(i + 20, true);
+      if (i + MIN_EOCD_LENGTH + commentLength !== buffer.byteLength) {
+        continue;
+      }
 
       // https://en.wikipedia.org/wiki/ZIP_(file_format)#End_of_central_directory_record_(EOCD)
       return {
@@ -1503,6 +1829,12 @@ export const parseOneLocalFile = (
       const hasDataDescriptor = Boolean((bitflags >> 3) & 1);
 
       const headerEndOffset = i + 30 + filenameLength + extraFieldLength;
+      if (headerEndOffset > buffer.byteLength) {
+        throw new RemoteZipError(
+          "Truncated local file header",
+          "INVALID_ARCHIVE",
+        );
+      }
       const rawCompressedSize = view.getUint32(i + 18, true);
       const rawUncompressedSize = view.getUint32(i + 22, true);
 
@@ -1521,50 +1853,43 @@ export const parseOneLocalFile = (
       const regularCompressedSize = z64.compressedSize ?? rawCompressedSize;
       const uncompressedSize = z64.uncompressedSize ?? rawUncompressedSize;
 
+      const compressedSize = hasDataDescriptor
+        ? compressedSizeOverride
+        : regularCompressedSize;
+      const dataEndOffset = headerEndOffset + compressedSize;
+      if (dataEndOffset > buffer.byteLength) {
+        throw new RemoteZipError(
+          "Truncated local file data",
+          "TRUNCATED_ENTRY",
+        );
+      }
+
       const hasOptionalSignature =
-        view.getUint32(headerEndOffset + compressedSizeOverride) ===
-        SIG_DATA_DESCRIPTOR;
+        hasDataDescriptor &&
+        dataEndOffset + 4 <= buffer.byteLength &&
+        view.getUint32(dataEndOffset) === SIG_DATA_DESCRIPTOR;
       const optionalSignatureOffset = hasOptionalSignature ? 4 : 0;
+      const descriptorOffset = dataEndOffset + optionalSignatureOffset;
+      const hasCompleteDescriptor =
+        hasDataDescriptor && descriptorOffset + 12 <= buffer.byteLength;
 
       return {
         meta: {
-          dataDescriptor: hasDataDescriptor
+          dataDescriptor: hasCompleteDescriptor
             ? {
                 optionalSignature: hasOptionalSignature
                   ? buffer.slice(
-                      headerEndOffset + compressedSizeOverride,
-                      headerEndOffset +
-                        compressedSizeOverride +
-                        optionalSignatureOffset,
+                      dataEndOffset,
+                      dataEndOffset + optionalSignatureOffset,
                     )
                   : undefined,
-                crc32: view.getUint32(
-                  headerEndOffset +
-                    compressedSizeOverride +
-                    optionalSignatureOffset,
-                  true,
-                ),
-                compressedSize: view.getUint32(
-                  headerEndOffset +
-                    compressedSizeOverride +
-                    optionalSignatureOffset +
-                    4,
-                  true,
-                ),
-                uncompressedSize: view.getUint32(
-                  headerEndOffset +
-                    compressedSizeOverride +
-                    optionalSignatureOffset +
-                    8,
-                  true,
-                ),
+                crc32: view.getUint32(descriptorOffset, true),
+                compressedSize: view.getUint32(descriptorOffset + 4, true),
+                uncompressedSize: view.getUint32(descriptorOffset + 8, true),
               }
             : undefined,
           compressedData: hasDataDescriptor
-            ? buffer.slice(
-                headerEndOffset,
-                headerEndOffset + compressedSizeOverride,
-              )
+            ? buffer.slice(headerEndOffset, dataEndOffset)
             : buffer.slice(
                 headerEndOffset,
                 headerEndOffset + regularCompressedSize,

@@ -17,7 +17,7 @@ Without downloading the entire ZIP:
 The gist of what the library does is:
 
 1. Get the content size of the ZIP file using a HTTP HEAD request.
-2. Get the last 100 bytes using HTTP Range queries (hoping it's enough) to read the end-of-central-directory (EOCD) section.
+2. Range-fetch the archive tail, widening up to the maximum EOCD comment size when needed.
 3. Using the EOCD, read the central directory (CD) section with a Range request. This section contains a complete file listing and file byte offsets in the ZIP.
 4. To get individual files, use another Range request with an offset to get the local file header + compressed data.
 
@@ -25,6 +25,9 @@ The gist of what the library does is:
 
 - PKWare _strong_ encryption (general-purpose bit 6) is detected and rejected
 - Multi-disk / split archives are not supported
+
+Range responses are validated against `Content-Range`; servers that ignore Range
+requests are rejected instead of causing a whole-archive download.
 
 > Decrypting WinZip AES entries uses the Web Crypto API (`crypto.subtle`), which
 > in browsers is only available in a secure context (HTTPS or `localhost`).
@@ -131,23 +134,6 @@ npm test          # run the test suite once
 
 ### Publish
 
-#### Setup
-
-1. Get an automation token from npm under settings
-
-   ```
-   https://www.npmjs.com/settings/$YOUR_USERNAME/tokens/
-   ```
-
-2. Add the token to your repository secrets.
-
-   ```
-   https://github.com/$YOUR_USERNAME/$YOUR_REPO_NAME/settings/secrets/actions/new
-   ```
-
-   - Name: `NPM_TOKEN`
-   - Value: The automation token you got from the previous step
-
 #### Run
 
 1. Create a new release.
@@ -156,7 +142,10 @@ npm test          # run the test suite once
    https://github.com/$YOUR_USERNAME/$YOUR_REPO_NAME/releases
    ```
 
-   The workflow at `./github/workflows/publish.yml` should run and publish your packages to both NPM and GitHub Packages.
+   The workflow at `.github/workflows/publish.yml` publishes to npm through
+   Trusted Publishing (OIDC), attests the bundles, and publishes to GitHub
+   Packages. The npm package must have this repository configured as a Trusted
+   Publisher.
 
    Don't forget to bump your version number in `package.json` before this.
    </details>
